@@ -1,5 +1,7 @@
-reader_dict = {
+from .multi_woz import MultiWOZSpanReader
 
+reader_dict = {
+    "multi_woz": MultiWOZSpanReader
 }
 
 

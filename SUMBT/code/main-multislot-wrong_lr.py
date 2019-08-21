@@ -105,8 +105,6 @@ class Processor(DataProcessor):
             ontology = json.load(fp_ontology)
             for slot in ontology.keys():
                 ontology[slot].append("none")
-                """ FIX_UNDEFINED: Add undefined value. """
-                ontology[slot].append("undefined")
             fp_ontology.close()
 
             if not config.target_slot == 'all':
@@ -148,17 +146,17 @@ class Processor(DataProcessor):
     def get_train_examples(self, data_dir, accumulation=False):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train-f.tsv")), "train", accumulation)
+            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train", accumulation)
 
     def get_dev_examples(self, data_dir, accumulation=False):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev-f.tsv")), "dev", accumulation)
+            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev", accumulation)
 
     def get_test_examples(self, data_dir, accumulation=False):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "test-f.tsv")), "test", accumulation)
+            self._read_tsv(os.path.join(data_dir, "test.tsv")), "test", accumulation)
 
     def get_labels(self):
         """See base class."""
@@ -314,9 +312,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
 def get_label_embedding(labels, max_seq_length, tokenizer, device):
     features = []
     for label in labels:
-        """ FIX_UNDEFINED: don't compute the embedding for 'undefined' """
-        if label == "undefined":
-            continue
         label_tokens = ["[CLS]"] + tokenizer.tokenize(label) + ["[SEP]"]
         label_token_ids = tokenizer.convert_tokens_to_ids(label_tokens)
         label_len = len(label_token_ids)
@@ -358,13 +353,9 @@ def warmup_linear(x, warmup=0.002):
 
 def main():
     """
-    This script fix the undefined values in ontology. Please search "FIX_UNDEFINED" to find the difference with `main-multislot.py`
-
-    For undefined values, we address `undefined` as the last possible value for each slot and remove its embedding.
-    Therefore we can mask their label ids as the ignore_index while computing loss,
-    so the undefined value will not have an influence on gradient and while computing
-    accuracy, they will be computed as wrong for the model never 'seen' undefined value.
+    This is the baseline model, where the calculation of training steps is wrong. Please compare with `main-multislot.py`
     """
+
     parser = argparse.ArgumentParser()
 
     ## Required parameters
@@ -568,12 +559,7 @@ def main():
     # Get Processor
     processor = Processor(args)
     label_list = processor.get_labels()
-    # num_labels = [len(labels) for labels in label_list]  # number of slot-values in each slot-type
-    """ 
-    FIX_UNDEFINED: Reduce 1 for 'undefined' label to avoid that the shape of initialized embedding is not compatible 
-    with the shape of that defined in __init__() method of model.
-    """
-    num_labels = [len(labels) - 1for labels in label_list]  # number of slot-values in each slot-type
+    num_labels = [len(labels) for labels in label_list]  # number of slot-values in each slot-type
 
     # tokenizer
     vocab_dir = os.path.join(args.bert_dir, '%s-vocab.txt' % args.bert_model)
@@ -592,8 +578,8 @@ def main():
         all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
 
-        num_train_features = all_input_ids.size(0)
-        num_train_steps = int(num_train_features / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+        # num_train_features = all_input_ids.size(0)
+        num_train_steps = int(len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
@@ -613,7 +599,8 @@ def main():
         ## Dev utterances
         all_input_ids_dev, all_input_len_dev, all_label_ids_dev = convert_examples_to_features(
             dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-        num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
+        # num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
+        num_dev_steps = int(len(dev_examples) / args.dev_batch_size * args.num_train_epochs)
 
         logger.info("***** Running validation *****")
         logger.info("  Num examples = %d", len(dev_examples))
@@ -635,7 +622,7 @@ def main():
 
     # Prepare model
     if args.nbt == 'rnn':
-        from BeliefTrackerSlotQueryMultiSlot_F import BeliefTracker
+        from BeliefTrackerSlotQueryMultiSlot import BeliefTracker
     elif args.nbt == 'transformer':
         from BeliefTrackerSlotQueryMultiSlotTransformer import BeliefTracker
     else:

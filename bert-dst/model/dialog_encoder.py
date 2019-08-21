@@ -11,6 +11,7 @@ class DialogEncoder(BertPreTrainedModel):
                  encoder_hidden_size: int = 125, encoder_num_layers: int = 1, encoder_dropout: float = 0.2):
         super(DialogEncoder, self).__init__(config)
         self.bert = BertModel(config)
+        self.config = config
 
         self.freeze_bert = freeze_bert
         if freeze_bert:
@@ -25,6 +26,8 @@ class DialogEncoder(BertPreTrainedModel):
             pass
         else:
             raise RuntimeError(f'Dialog encoder only support `lstm`, `gru` and `transformer`.')
+
+        self.output_dim = encoder_hidden_size
 
         self.apply(self.init_weights)
 
@@ -43,4 +46,4 @@ class DialogEncoder(BertPreTrainedModel):
         # [batch, max_turns, h]
         dialog_hidden = seq_output[:, :, 0]
         dialog_hidden = self.dialog_encoder(dialog_hidden, dialog_mask)
-        return dialog_hidden
+        return dialog_hidden, seq_output
