@@ -62,7 +62,14 @@ class MultiWOZReader:
             examples.append(MultiWOZExample(dialog_id=pre_dialog_id,
                                             dialog_turn_examples=dialog_turn_examples))
         data_loader = self._convert_examples_to_features(examples, max_seq_length, state, batch_size)
-        return examples, data_loader
+        value_input_ids, value_input_mask, value_token_type_ids = self._convert_slot_values_into_ids(self.value_vocab)
+        meta_data = {
+            'examples': examples,
+            'value_input_ids': value_input_ids,
+            'value_input_mask': value_input_mask,
+            'value_token_type_ids': value_token_type_ids
+        }
+        return meta_data, data_loader
 
     def _convert_examples_to_features(self, examples: List[MultiWOZExample], max_seq_length: int, state: State,
                                       batch_size: int):
@@ -97,7 +104,10 @@ class MultiWOZReader:
                 turn_input_mask = []
                 for domain_slot, value in domain_slot_values.items():
                     # domain_slot_pairs.append(domain_slot)
-                    value_ids.append(self.value_vocab[self.domain_slot_vocab[domain_slot]][value])
+                    if value == 'undefined':
+                        value_ids.append(-1)
+                    else:
+                        value_ids.append(self.value_vocab[self.domain_slot_vocab[domain_slot]][value])
 
                     slot_tokens = ['[CLS]'] + self.bert_tokenizer.tokenize(domain_slot) + ['[SEP]']
                     type_ids = [0] * len(slot_tokens)
@@ -155,3 +165,26 @@ class MultiWOZReader:
             ontology[slot].append("none")
             ontology[slot].append("undefined")
         return collections.OrderedDict(sorted(ontology.items()))
+
+    def _convert_slot_values_into_ids(self, value_vocab):
+        slot_value_input_ids = []
+        max_value_length = 0
+        for slot_values in value_vocab:
+            value_input_ids = []
+            for value in slot_values:
+                input_ids = self.bert_tokenizer.convert_tokens_to_ids(['[CLS]'] + self.bert_tokenizer.tokenize(value) + ['[SEP]'])
+                value_input_ids.append(input_ids)
+                max_value_length = max(max_value_length, len(input_ids))
+            slot_value_input_ids.append(value_input_ids)
+
+        # Pad
+        input_mask = []
+        token_type_ids = []
+        for slot_values in slot_value_input_ids:
+            for value_idx, input_ids in enumerate(slot_values):
+                padding_len = max_value_length - len(input_ids)
+                input_mask.append([1] * len(input_ids) + [0] * padding_len)
+                token_type_ids.append([1] * len(input_ids) + [0] * padding_len)
+                slot_values[value_idx] += [0] * padding_len
+
+        return slot_value_input_ids, input_mask, token_type_ids
