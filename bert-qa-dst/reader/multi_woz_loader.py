@@ -1,7 +1,6 @@
 import collections
 import csv
 import json
-import logging
 from typing import List
 
 import torch
@@ -9,8 +8,9 @@ from pytorch_transformers.tokenization_bert import BertTokenizer
 from torch.utils.data import RandomSampler, SequentialSampler, TensorDataset, DataLoader
 
 from util.data_instance import MultiWOZExample, DialogTurnExample, State
+from util.logger import get_child_logger
 
-logger = logging.getLogger(__name__)
+logger = get_child_logger(__name__)
 
 
 class MultiWOZReader:
@@ -104,10 +104,10 @@ class MultiWOZReader:
                 turn_input_mask = []
                 for domain_slot, value in domain_slot_values.items():
                     # domain_slot_pairs.append(domain_slot)
-                    if value == 'undefined':
-                        value_ids.append(-1)
-                    else:
-                        value_ids.append(self.value_vocab[self.domain_slot_vocab[domain_slot]][value])
+                    # if value == 'undefined':
+                    #     value_ids.append(-1)
+                    # else:
+                    value_ids.append(self.value_vocab[self.domain_slot_vocab[domain_slot]][value])
 
                     slot_tokens = ['[CLS]'] + self.bert_tokenizer.tokenize(domain_slot) + ['[SEP]']
                     type_ids = [0] * len(slot_tokens)
@@ -188,3 +188,9 @@ class MultiWOZReader:
                 slot_values[value_idx] += [0] * padding_len
 
         return slot_value_input_ids, input_mask, token_type_ids
+
+    @classmethod
+    def from_params(cls, _config):
+        _vocab_file = _config["vocab_file"]
+        _ontology_file = _config["ontology_file"]
+        return cls(_vocab_file, _ontology_file)
