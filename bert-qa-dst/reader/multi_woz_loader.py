@@ -2,6 +2,7 @@ import collections
 import csv
 import json
 from typing import List
+from tqdm import tqdm
 
 import torch
 from pytorch_transformers.tokenization_bert import BertTokenizer
@@ -15,6 +16,9 @@ logger = get_child_logger(__name__)
 
 class MultiWOZReader:
     def __init__(self, vocab_file, ontology_file):
+        logger.info("Params: ")
+        logger.info(f"vocab_file: {vocab_file}")
+        logger.info(f"ontology_file: {ontology_file}")
         self.bert_tokenizer = BertTokenizer.from_pretrained(pretrained_model_name_or_path=vocab_file)
         self.ontology = self._read_labels(ontology_file)
         self.target_slot = list(self.ontology.keys())
@@ -43,7 +47,7 @@ class MultiWOZReader:
         pre_dialog_id = ''
         examples = []
         dialog_turn_examples = []
-        for i, line in enumerate(data):
+        for i, line in enumerate(tqdm(data, desc='Reading examples...')):
             dialog_id = line[0]
             turn_id = line[1]
             if pre_dialog_id is not None:
@@ -82,10 +86,11 @@ class MultiWOZReader:
         all_value_ids = []
         all_dialog_mask = []
         padding = [0] * (max_seq_length - 3)
-        turn_input_id_padding = self.bert_tokenizer.convert_tokens_to_ids(['[CLS]', '[SEP]', '[SEP]']) + padding
-        turn_token_type_id_padding = [0, 0, 1] + padding
-        turn_mask_padding = [1, 1, 1] + padding
-        for example in examples:
+        turn_input_id_padding = [self.bert_tokenizer.convert_tokens_to_ids(['[CLS]', '[SEP]', '[SEP]']) + padding] * len(
+            self.domain_slot_vocab)
+        turn_token_type_id_padding = [[0, 0, 1] + padding] * len(self.domain_slot_vocab)
+        turn_mask_padding = [[1, 1, 1] + padding] * len(self.domain_slot_vocab)
+        for example in tqdm(examples, desc='Converting examples to features...'):
             dialog_examples = example.dialog_turn_examples
             dialog_input_ids = []
             dialog_token_type_ids = []
@@ -118,9 +123,19 @@ class MultiWOZReader:
                     type_ids += [1] * (len(tokens) - len(slot_tokens))
                     mask = [1] * len(type_ids)
                     input_ids = self.bert_tokenizer.convert_tokens_to_ids(tokens)
+                    while len(input_ids) < max_seq_length:
+                        input_ids.append(0)
+                        type_ids.append(0)
+                        mask.append(0)
+                    assert len(input_ids) == max_seq_length
+                    assert len(type_ids) == max_seq_length
+                    assert len(mask) == max_seq_length
                     turn_input_ids.append(input_ids)
                     turn_token_type_ids.append(type_ids)
                     turn_input_mask.append(mask)
+                assert len(turn_input_ids) == len(self.target_slot)
+                assert len(turn_token_type_ids) == len(self.domain_slot_vocab)
+                assert len(turn_input_mask) == len(self.domain_slot_vocab)
                 dialog_input_ids.append(turn_input_ids)
                 dialog_token_type_ids.append(turn_token_type_ids)
                 dialog_input_mask.append(turn_input_mask)
@@ -132,6 +147,11 @@ class MultiWOZReader:
                 dialog_input_mask.append(turn_mask_padding)
                 dialog_value_ids.append([-1] * len(self.domain_slot_vocab))
                 dialog_mask.append(0)
+            assert len(dialog_input_ids) == max_turns
+            assert len(dialog_token_type_ids) == max_turns
+            assert len(dialog_input_mask) == max_turns
+            assert len(dialog_value_ids) == max_turns
+            assert len(dialog_mask) == max_turns
             all_input_ids.append(dialog_input_ids)
             all_token_type_ids.append(dialog_token_type_ids)
             all_input_mask.append(dialog_input_mask)
@@ -146,15 +166,16 @@ class MultiWOZReader:
         assert input_ids.size() == token_type_ids.size() == input_mask.size() == (len(all_input_ids), max_turns,
                                                                                   len(self.domain_slot_vocab),
                                                                                   max_seq_length)
-        assert value_ids.size()[1:] == (max_turns, len(self.domain_slot_vocab))
+        assert value_ids.size() == (len(all_input_ids), max_turns, len(self.domain_slot_vocab))
         assert dialog_mask.size(1) == max_turns
         example_index = torch.arange(input_ids.size(0))
-        tensors = TensorDataset(input_ids, token_type_ids, input_mask, value_ids, dialog_mask, example_index)
+        tensors = TensorDataset(input_ids, token_type_ids, input_mask, dialog_mask, value_ids, example_index)
         if state == State.TRAIN:
             sampler = RandomSampler(tensors)
         else:
             sampler = SequentialSampler(tensors)
         data_loader = DataLoader(tensors, batch_size, sampler=sampler)
+        logger.info(f"Max turns: {max_turns}")
         return data_loader
 
     @staticmethod
@@ -178,15 +199,22 @@ class MultiWOZReader:
             slot_value_input_ids.append(value_input_ids)
 
         # Pad
-        input_mask = []
-        token_type_ids = []
+        all_input_mask = []
+        all_token_type_ids = []
         for slot_values in slot_value_input_ids:
+            input_mask = []
+            token_type_ids = []
             for value_idx, input_ids in enumerate(slot_values):
                 padding_len = max_value_length - len(input_ids)
                 input_mask.append([1] * len(input_ids) + [0] * padding_len)
                 token_type_ids.append([1] * len(input_ids) + [0] * padding_len)
                 slot_values[value_idx] += [0] * padding_len
+            all_input_mask.append(input_mask)
+            all_token_type_ids.append(token_type_ids)
 
+        slot_value_input_ids = [torch.LongTensor(x) for x in slot_value_input_ids]
+        input_mask = [torch.LongTensor(x) for x in all_input_mask]
+        token_type_ids = [torch.LongTensor(x) for x in all_token_type_ids]
         return slot_value_input_ids, input_mask, token_type_ids
 
     @classmethod

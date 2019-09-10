@@ -8,4 +8,4 @@ model_dict = {
 def from_params(_config):
     _model_params = _config.pop("model")
     _model_name = _model_params.pop("name")
-    return model_dict[_model_name].from_parms(_model_params)
+    return model_dict[_model_name].from_params(_model_params)

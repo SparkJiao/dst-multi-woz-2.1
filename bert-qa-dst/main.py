@@ -17,12 +17,16 @@ from util.general_util import AverageMeter
 from util.logger import setting_logger
 
 
-def set_seed(_seed):
-    random.seed(_seed)
-    np.random.seed(_seed)
-    torch.manual_seed(_seed)
-    if args.n_gpu > 0:
-        torch.cuda.manual_seed_all(_seed)
+def set_seed(_config):
+    random.seed(_config["seed"])
+    np.random.seed(_config["seed"])
+    torch.manual_seed(_config["seed"])
+    if _config["n_gpu"] > 0:
+        torch.cuda.manual_seed_all(_config["seed"])
+
+
+def move(ls, device):
+    return [x.to(device) for x in ls]
 
 
 def train(_config, train_meta_data, train_data_loader, eval_meta_data, eval_data_loader, model):
@@ -69,12 +73,12 @@ def train(_config, train_meta_data, train_data_loader, eval_meta_data, eval_data
     train_loss = AverageMeter()
     best_metric = 0
     model.zero_grad()
-    set_seed(_config["seed"])
+    set_seed(_config)
     for epoch in range(int(num_train_epochs)):
         logger.info(f"=============== Running at epoch {epoch} ===============")
         for step, batch in enumerate(tqdm(train_data_loader, desc="Training", dynamic_ncols=True)):
             model.train()
-            batch = tuple(t.to(_config["device"]) for t in batch)
+            # batch = tuple(t.to(_config["device"]) for t in batch)
             batch_output = model(*batch)
             loss = batch_output["loss"]
 
@@ -151,7 +155,7 @@ def main(_config):
     global logger
     logger = setting_logger(_config["output_dir"])
 
-    set_seed(_config["seed"])
+    set_seed(_config)
 
     reader = from_params(_config)
     model = BertQADst(_config)
@@ -162,6 +166,9 @@ def main(_config):
         _config["read_eval"]["state"] = State.VALIDATE
         train_meta_data, train_data_loader = reader.read(**_config["read_train"])
         eval_meta_data, eval_data_loader = reader.read(**_config["read_eval"])
+        model.get_value_embedding(move(train_meta_data["value_input_ids"], device),
+                                  move(train_meta_data["value_input_mask"], device),
+                                  move(train_meta_data["value_token_type_ids"], device))
         train(_config, train_meta_data, train_data_loader, eval_meta_data, eval_data_loader, model)
 
     if _config["do_predict"]:
