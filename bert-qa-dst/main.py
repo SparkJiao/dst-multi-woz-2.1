@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import random
+import time
 
 import numpy as np
 import torch
@@ -169,6 +170,8 @@ def main(_config):
         model.get_value_embedding(move(train_meta_data["value_input_ids"], device),
                                   move(train_meta_data["value_input_mask"], device),
                                   move(train_meta_data["value_token_type_ids"], device))
+        torch.cuda.empty_cache()
+        # time.sleep(120)
         train(_config, train_meta_data, train_data_loader, eval_meta_data, eval_data_loader, model)
 
     if _config["do_predict"]:

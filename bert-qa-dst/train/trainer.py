@@ -1,6 +1,7 @@
 import torch
 from pytorch_transformers.modeling_bert import BertModel
 from torch import nn
+import time
 
 import model
 from util.general_util import AverageMeter
@@ -25,6 +26,7 @@ class BertQADst(nn.Module):
     def forward(self, input_ids, token_type_ids, input_mask, dialog_mask, value_ids=None, example_index=None):
         slot_dim = input_ids.size(2)
         logger.info(value_ids.size())
+        logger.info(value_ids.dtype)
         outputs = []
         for slot_index in range(slot_dim):
             inputs = (input_ids[:, :, slot_index], token_type_ids[:, :, slot_index], input_mask[:, :, slot_index],
@@ -50,12 +52,12 @@ class BertQADst(nn.Module):
     def get_value_embedding(self, value_input_ids, value_input_mask, value_token_type_ids):
         logger.info("Generating value embeddings")
         self.eval()
-        for slot_index, (input_ids, input_mask, token_type_ids) in enumerate(
-                zip(value_input_ids, value_input_mask, value_token_type_ids)):
-            h = self.value_encoder(input_ids, token_type_ids, input_mask)[0][:, 0]
-            self.value_embedding.append(nn.Embedding.from_pretrained(h, freeze=True))
+        with torch.no_grad():
+            for slot_index, (input_ids, input_mask, token_type_ids) in enumerate(
+                    zip(value_input_ids, value_input_mask, value_token_type_ids)):
+                h = self.value_encoder(input_ids, token_type_ids, input_mask)[0][:, 0]
+                self.value_embedding.append(nn.Embedding.from_pretrained(h, freeze=True))
         self.value_encoder = None
-        torch.cuda.empty_cache()
         logger.info("Value embedding has been saved")
 
     def get_metric(self, reset=False):

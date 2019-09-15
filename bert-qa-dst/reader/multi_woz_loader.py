@@ -3,6 +3,7 @@ import csv
 import json
 from typing import List
 from tqdm import tqdm
+import pickle
 
 import torch
 from pytorch_transformers.tokenization_bert import BertTokenizer
@@ -43,40 +44,57 @@ class MultiWOZReader:
             return lines
 
     def read(self, input_file, max_seq_length: int, state: State, batch_size: int):
-        data = self._read_tsv(input_file)
-        pre_dialog_id = ''
-        examples = []
-        dialog_turn_examples = []
-        for i, line in enumerate(tqdm(data, desc='Reading examples...')):
-            dialog_id = line[0]
-            turn_id = line[1]
-            if pre_dialog_id is not None:
-                if dialog_id != pre_dialog_id and dialog_turn_examples:
-                    examples.append(MultiWOZExample(dialog_id=pre_dialog_id,
-                                                    dialog_turn_examples=dialog_turn_examples))
-                    dialog_turn_examples = []
-                    assert examples[-1].dialog_turn_examples != []
-            values = line[4:]
-            assert len(values) == len(self.target_slot)
-            domain_slot_values = {domain_slot: value for domain_slot, value in zip(self.target_slot, values)}
-            dialog_turn_examples.append(
-                DialogTurnExample(usr_utt=line[2], sys_utt=line[3], domain_slot_value=domain_slot_values))
-            pre_dialog_id = dialog_id
-        if dialog_turn_examples:
-            examples.append(MultiWOZExample(dialog_id=pre_dialog_id,
-                                            dialog_turn_examples=dialog_turn_examples))
-        data_loader = self._convert_examples_to_features(examples, max_seq_length, state, batch_size)
+
         value_input_ids, value_input_mask, value_token_type_ids = self._convert_slot_values_into_ids(self.value_vocab)
         meta_data = {
-            'examples': examples,
             'value_input_ids': value_input_ids,
             'value_input_mask': value_input_mask,
             'value_token_type_ids': value_token_type_ids
         }
+
+        cached_file = f'{input_file}-{max_seq_length}'
+        try:
+            logger.info(f'Load data from cache: {cached_file}')
+            with open(cached_file, "rb") as f:
+                input_data = pickle.load(f)
+        except FileNotFoundError:
+            data = self._read_tsv(input_file)
+            pre_dialog_id = ''
+            examples = []
+            dialog_turn_examples = []
+            for i, line in enumerate(tqdm(data, desc='Reading examples...')):
+                dialog_id = line[0]
+                turn_id = line[1]
+                if pre_dialog_id is not None:
+                    if dialog_id != pre_dialog_id and dialog_turn_examples:
+                        examples.append(MultiWOZExample(dialog_id=pre_dialog_id,
+                                                        dialog_turn_examples=dialog_turn_examples))
+                        dialog_turn_examples = []
+                        assert examples[-1].dialog_turn_examples != []
+                values = line[4:]
+                assert len(values) == len(self.target_slot)
+                domain_slot_values = {domain_slot: value for domain_slot, value in zip(self.target_slot, values)}
+                dialog_turn_examples.append(
+                    DialogTurnExample(usr_utt=line[2], sys_utt=line[3], domain_slot_value=domain_slot_values))
+                pre_dialog_id = dialog_id
+            if dialog_turn_examples:
+                examples.append(MultiWOZExample(dialog_id=pre_dialog_id,
+                                                dialog_turn_examples=dialog_turn_examples))
+            tensor_data = self._convert_examples_to_features(examples, max_seq_length)
+            input_data = {
+                'examples': examples,
+                'tensor_data': tensor_data
+            }
+            with open(cached_file, "wb") as f:
+                pickle.dump(input_data, f)
+        examples = input_data['examples']
+        tensor_data = input_data['tensor_data']
+        meta_data["examples"] = examples
+        data_loader = self._get_data_loader(tensor_data, state=state, batch_size=batch_size)
+        logger.info(f'Load {len(examples)} examples and {len(data_loader)} input features')
         return meta_data, data_loader
 
-    def _convert_examples_to_features(self, examples: List[MultiWOZExample], max_seq_length: int, state: State,
-                                      batch_size: int):
+    def _convert_examples_to_features(self, examples: List[MultiWOZExample], max_seq_length: int):
         max_turns = 0
         for example in examples:
             max_turns = max(len(example.dialog_turn_examples), max_turns)
@@ -158,24 +176,45 @@ class MultiWOZReader:
             all_value_ids.append(dialog_value_ids)
             all_dialog_mask.append(dialog_mask)
 
-        input_ids = torch.LongTensor(all_input_ids)
-        token_type_ids = torch.LongTensor(all_token_type_ids)
-        input_mask = torch.LongTensor(all_input_mask)
-        value_ids = torch.LongTensor(all_value_ids)
-        dialog_mask = torch.LongTensor(all_dialog_mask)
-        assert input_ids.size() == token_type_ids.size() == input_mask.size() == (len(all_input_ids), max_turns,
-                                                                                  len(self.domain_slot_vocab),
-                                                                                  max_seq_length)
-        assert value_ids.size() == (len(all_input_ids), max_turns, len(self.domain_slot_vocab))
-        assert dialog_mask.size(1) == max_turns
-        example_index = torch.arange(input_ids.size(0))
-        tensors = TensorDataset(input_ids, token_type_ids, input_mask, dialog_mask, value_ids, example_index)
-        if state == State.TRAIN:
-            sampler = RandomSampler(tensors)
-        else:
-            sampler = SequentialSampler(tensors)
-        data_loader = DataLoader(tensors, batch_size, sampler=sampler)
+        # input_ids = torch.LongTensor(all_input_ids)
+        # token_type_ids = torch.LongTensor(all_token_type_ids)
+        # input_mask = torch.LongTensor(all_input_mask)
+        # value_ids = torch.LongTensor(all_value_ids)
+        # dialog_mask = torch.LongTensor(all_dialog_mask)
+        # assert input_ids.size() == token_type_ids.size() == input_mask.size() == (len(all_input_ids), max_turns,
+        #                                                                           len(self.domain_slot_vocab),
+        #                                                                           max_seq_length)
+        # assert value_ids.size() == (len(all_input_ids), max_turns, len(self.domain_slot_vocab))
+        # assert dialog_mask.size(1) == max_turns
+
+        input_data = {
+            "input_ids": all_input_ids,
+            "token_type_ids": all_token_type_ids,
+            "input_mask": all_input_mask,
+            "dialog_mask": all_dialog_mask,
+            "value_ids": all_value_ids
+        }
         logger.info(f"Max turns: {max_turns}")
+        return input_data
+
+    @staticmethod
+    def _data_to_tensor(tensor_data):
+        input_ids = torch.LongTensor(tensor_data["input_ids"])
+        token_type_ids = torch.LongTensor(tensor_data["token_type_ids"])
+        input_mask = torch.LongTensor(tensor_data["input_mask"])
+        dialog_mask = torch.LongTensor(tensor_data["dialog_mask"])
+        value_ids = torch.LongTensor(tensor_data["value_ids"])
+        example_indexes = torch.arange(input_ids.size(0), dtype=torch.long)
+        return input_ids, token_type_ids, input_mask, dialog_mask, value_ids, example_indexes
+
+    def _get_data_loader(self, tensor_data, state: State, batch_size):
+        tensors = self._data_to_tensor(tensor_data)
+        dataset = TensorDataset(*tensors)
+        if state == State.TRAIN:
+            sampler = RandomSampler(dataset)
+        else:
+            sampler = SequentialSampler(dataset)
+        data_loader = DataLoader(dataset, batch_size, sampler=sampler)
         return data_loader
 
     @staticmethod
