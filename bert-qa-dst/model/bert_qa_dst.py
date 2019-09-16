@@ -21,7 +21,7 @@ class BertDialogMatching(nn.Module):
 
         self.dis_metric = nn.CosineSimilarity(dim=-1, eps=1e-08)
 
-    def forward(self, input_ids, token_type_ids, input_mask, dialog_mask, value_embedding, value_ids=None):
+    def forward(self, input_ids, token_type_ids, input_mask, dialog_mask, value_embedding, value_ids=None, value_mask=None):
         batch, max_turns, _ = input_ids.size()
         input_ids = input_ids.reshape(batch * max_turns, -1)
         token_type_ids = token_type_ids.reshape(batch * max_turns, -1)
@@ -30,13 +30,20 @@ class BertDialogMatching(nn.Module):
         seq_vec = seq_output[:, 0].reshape(batch, max_turns, -1)
         dialog_hidden = self.rnn(seq_vec, dialog_mask)
 
-        value_dim = value_embedding.size(0)
-        value_embedding = value_embedding.unsqueeze(0).expand(batch * max_turns, -1, -1)
+        # value_dim = value_embedding.size(0)
+        # value_embedding = value_embedding.unsqueeze(0).expand(batch * max_turns, -1, -1)
+        _, value_dim, _ = value_embedding.size()
+        value_embedding = value_embedding.unsqueeze(1).expand(-1, max_turns, -1, -1).reshape(batch * max_turns, value_dim, -1)
         logits = self.dis_metric(dialog_hidden.reshape(-1, 1, dialog_hidden.size(-1)), value_embedding).squeeze(1)
 
         undefined_mask = (value_ids >= value_dim)
         value_ids.masked_fill_(undefined_mask, -1)
-        loss = F.cross_entropy(logits, value_ids.reshape(-1), ignore_index=-1)
+        if value_mask is not None:
+            value_mask = value_mask.unsqueeze(1).expand(-1, max_turns, -1).reshape(batch * max_turns, value_dim)
+            logits = layers.masked_log_softmax(logits, value_mask, dim=-1)
+            loss = F.nll_loss(logits, value_ids.reshape(-1), ignore_index=-1)
+        else:
+            loss = F.cross_entropy(logits, value_ids.reshape(-1), ignore_index=-1)
 
         logits = logits.reshape(batch, max_turns, value_dim)
         return {

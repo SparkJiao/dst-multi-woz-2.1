@@ -8,19 +8,20 @@
         "ontology_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/ontology.json"
     },
     "read_train": {
-        "input_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/dev-f.tsv",
-        "max_seq_length": 64,
-        "batch_size": 1
+        "input_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/train-f.tsv",
+        "max_seq_length": 256,
+        "batch_size": 2,
+        "flat_slot": true
     },
     "read_eval": {
         "input_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/dev-f.tsv",
-        "max_seq_length": 64,
-        "batch_size": 1
+        "max_seq_length": 256,
+        "batch_size": 2
     },
     "read_test": {
         "input_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/test-f.tsv",
-        "max_seq_length": 64,
-        "batch_size": 1
+        "max_seq_length": 256,
+        "batch_size": 2
     },
     "model": {
         "name": "dialog_matching",
@@ -36,5 +37,5 @@
     "weight_decay": 0.1,
     "max_grad_norm": 0.0,
     "warmup_steps": 10000,
-    "fp16_opt_level": "O3"
+    "fp16_opt_level": "O2"
 }

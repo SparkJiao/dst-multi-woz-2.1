@@ -11,7 +11,8 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from reader import from_params
-from train.trainer import BertQADst
+# from train.trainer import BertQADst
+from train.flat_trainer import BertQADst
 from util.config import get_config
 from util.data_instance import State
 from util.general_util import AverageMeter

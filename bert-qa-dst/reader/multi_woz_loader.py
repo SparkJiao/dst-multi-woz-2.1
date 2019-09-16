@@ -43,7 +43,7 @@ class MultiWOZReader:
                 lines.append(line)
             return lines
 
-    def read(self, input_file, max_seq_length: int, state: State, batch_size: int):
+    def read(self, input_file, max_seq_length: int, state: State, batch_size: int, flat_slot: bool = False):
 
         value_input_ids, value_input_mask, value_token_type_ids = self._convert_slot_values_into_ids(self.value_vocab)
         meta_data = {
@@ -90,7 +90,7 @@ class MultiWOZReader:
         examples = input_data['examples']
         tensor_data = input_data['tensor_data']
         meta_data["examples"] = examples
-        data_loader = self._get_data_loader(tensor_data, state=state, batch_size=batch_size)
+        data_loader = self._get_data_loader(tensor_data, state=state, batch_size=batch_size, flat_slot=flat_slot)
         logger.info(f'Load {len(examples)} examples and {len(data_loader)} input features')
         return meta_data, data_loader
 
@@ -198,17 +198,34 @@ class MultiWOZReader:
         return input_data
 
     @staticmethod
-    def _data_to_tensor(tensor_data):
+    def _data_to_tensor(tensor_data, flat_slot: bool = False):
+        # data_len, max_turns, slot_dim, max_seq_length
         input_ids = torch.LongTensor(tensor_data["input_ids"])
         token_type_ids = torch.LongTensor(tensor_data["token_type_ids"])
         input_mask = torch.LongTensor(tensor_data["input_mask"])
+        # data_len, max_turns
         dialog_mask = torch.LongTensor(tensor_data["dialog_mask"])
+        # data_len, max_turns, slot_dim
         value_ids = torch.LongTensor(tensor_data["value_ids"])
         example_indexes = torch.arange(input_ids.size(0), dtype=torch.long)
-        return input_ids, token_type_ids, input_mask, dialog_mask, value_ids, example_indexes
 
-    def _get_data_loader(self, tensor_data, state: State, batch_size):
-        tensors = self._data_to_tensor(tensor_data)
+        data_len, max_turns, slot_dim, max_seq_length = input_ids.size()
+        assert slot_dim == token_type_ids.size(2) == input_mask.size(2) == value_ids.size(2)
+
+        if not flat_slot:
+            return input_ids, token_type_ids, input_mask, dialog_mask, value_ids, example_indexes
+
+        slot_indexes = torch.arange(slot_dim, dtype=torch.long).unsqueeze(-1).expand(-1, data_len).reshape(-1)
+        input_ids = input_ids.permute(2, 0, 1, 3).reshape(slot_dim * data_len, max_turns, max_seq_length)
+        token_type_ids = token_type_ids.permute(2, 0, 1, 3).reshape(slot_dim * data_len, max_turns, max_seq_length)
+        input_mask = input_mask.permute(2, 0, 1, 3).reshape(slot_dim * data_len, max_turns, max_seq_length)
+        value_ids = value_ids.permute(2, 0, 1).reshape(slot_dim * data_len, max_turns)
+        dialog_mask = dialog_mask.unsqueeze(0).expand(slot_dim, -1, -1).reshape(slot_dim * data_len, max_turns)
+        example_indexes = example_indexes.unsqueeze(0).expand(slot_dim, -1, -1).reshape(slot_dim * data_len)
+        return input_ids, token_type_ids, input_mask, dialog_mask, value_ids, example_indexes, slot_indexes
+
+    def _get_data_loader(self, tensor_data, state: State, batch_size, flat_slot: bool = False):
+        tensors = self._data_to_tensor(tensor_data, flat_slot=flat_slot)
         dataset = TensorDataset(*tensors)
         if state == State.TRAIN:
             sampler = RandomSampler(dataset)
