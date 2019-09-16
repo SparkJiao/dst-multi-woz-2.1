@@ -41,9 +41,9 @@ class BertDialogMatching(nn.Module):
         if value_mask is not None:
             value_mask = value_mask.unsqueeze(1).expand(-1, max_turns, -1).reshape(batch * max_turns, value_dim)
             logits = layers.masked_log_softmax(logits, value_mask, dim=-1)
-            loss = F.nll_loss(logits, value_ids.reshape(-1), ignore_index=-1)
+            loss = F.nll_loss(logits, value_ids.reshape(-1), ignore_index=-1, reduction='sum') / batch
         else:
-            loss = F.cross_entropy(logits, value_ids.reshape(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits, value_ids.reshape(-1), ignore_index=-1, reduction='sum') / batch
 
         logits = logits.reshape(batch, max_turns, value_dim)
         return {

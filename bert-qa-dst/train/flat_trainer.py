@@ -87,7 +87,7 @@ class BertQADst(nn.Module):
             value_embedding_list.append(self.value_embedding[x].weight)
             max_value_dim = max(max_value_dim, self.value_embedding[x].weight.size(0))
         value_hidden_dim = value_embedding_list[0].size(-1)
-        value_padding = value_embedding_list[0].new_zeros(1, value_hidden_dim)
+        value_padding = value_embedding_list[0].new_full((1, value_hidden_dim), 1e-8)
         output = []
         value_mask = value_padding.new_ones(len(index), max_value_dim)
         for value_emb_idx, value_embedding in enumerate(value_embedding_list):
