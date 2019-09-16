@@ -79,7 +79,7 @@ def train(_config, train_meta_data, train_data_loader, eval_meta_data, eval_data
         logger.info(f"=============== Running at epoch {epoch} ===============")
         for step, batch in enumerate(tqdm(train_data_loader, desc="Training", dynamic_ncols=True)):
             model.train()
-            # batch = tuple(t.to(_config["device"]) for t in batch)
+            batch = tuple(t.to(_config["device"]) for t in batch)
             batch_output = model(*batch)
             loss = batch_output["loss"]
 
@@ -106,8 +106,7 @@ def train(_config, train_meta_data, train_data_loader, eval_meta_data, eval_data
                 summary_writer.add_scalar(f"train/loss", train_loss.avg, global_step)
                 summary_writer.add_scalar(f"lr", scheduler.get_lr()[0], global_step)
 
-                if global_step % _config["per_eval_step"] == 0 or \
-                        (global_step + 1) == len(train_data_loader) // gradient_accumulation_steps:
+                if global_step % _config["per_eval_step"] == 0:
                     eval_metric = evaluate(_config, model, eval_meta_data, eval_data_loader)
                     logger.info(f"Eval at {eval_cnt} times:")
                     for k, v in eval_metric:
@@ -171,7 +170,6 @@ def main(_config):
                                   move(train_meta_data["value_input_mask"], device),
                                   move(train_meta_data["value_token_type_ids"], device))
         torch.cuda.empty_cache()
-        # time.sleep(120)
         train(_config, train_meta_data, train_data_loader, eval_meta_data, eval_data_loader, model)
 
     if _config["do_predict"]:

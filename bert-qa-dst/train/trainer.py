@@ -26,12 +26,17 @@ class BertQADst(nn.Module):
     def forward(self, input_ids, token_type_ids, input_mask, dialog_mask, value_ids=None, example_index=None):
         slot_dim = input_ids.size(2)
         logger.info(value_ids.size())
+        logger.info(input_ids.size())
         logger.info(value_ids.dtype)
+        # TODO:
+        #  Currently CUDA out of memory always happen since the all slot will be processed in a single batch.
+        #  Make a single instance for each slot will be better.
         outputs = []
         for slot_index in range(slot_dim):
+            logger.info(f"Slot Index: {slot_index}")
             inputs = (input_ids[:, :, slot_index], token_type_ids[:, :, slot_index], input_mask[:, :, slot_index],
                       dialog_mask, self.value_embedding[slot_index].weight, value_ids[:, :, slot_index])
-            inputs = tuple([t.to(self.device) for t in inputs])
+            # inputs = tuple([t.to(self.device) for t in inputs])
             output = self.model(*inputs)
             outputs.append(output)
 
