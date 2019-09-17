@@ -54,8 +54,8 @@ class MultiWOZReader:
 
         cached_file = f'{input_file}-{max_seq_length}'
         try:
-            logger.info(f'Load data from cache: {cached_file}')
             with open(cached_file, "rb") as f:
+                logger.info(f'Load data from cache: {cached_file}')
                 input_data = pickle.load(f)
         except FileNotFoundError:
             data = self._read_tsv(input_file)

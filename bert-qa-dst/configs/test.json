@@ -9,7 +9,7 @@
     },
     "read_train": {
         "input_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/train-f.tsv",
-        "max_seq_length": 256,
+        "max_seq_length": 128,
         "batch_size": 2,
         "flat_slot": true
     },

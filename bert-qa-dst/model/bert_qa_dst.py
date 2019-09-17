@@ -29,19 +29,29 @@ class BertDialogMatching(nn.Module):
         seq_output = self.bert(input_ids, token_type_ids, input_mask)[0]
         seq_vec = seq_output[:, 0].reshape(batch, max_turns, -1)
         dialog_hidden = self.rnn(seq_vec, dialog_mask)
+        # logger.info("dialog hidden:")
+        # logger.info(dialog_hidden[0][0])
 
         # value_dim = value_embedding.size(0)
         # value_embedding = value_embedding.unsqueeze(0).expand(batch * max_turns, -1, -1)
         _, value_dim, _ = value_embedding.size()
         value_embedding = value_embedding.unsqueeze(1).expand(-1, max_turns, -1, -1).reshape(batch * max_turns, value_dim, -1)
+        # logger.info("value embedding")
+        # logger.info(value_embedding[0][-1])
         logits = self.dis_metric(dialog_hidden.reshape(-1, 1, dialog_hidden.size(-1)), value_embedding).squeeze(1)
+        # logger.info("logits:")
+        # logger.info(logits[0])
 
         undefined_mask = (value_ids >= value_dim)
         value_ids.masked_fill_(undefined_mask, -1)
         if value_mask is not None:
             value_mask = value_mask.unsqueeze(1).expand(-1, max_turns, -1).reshape(batch * max_turns, value_dim)
             logits = layers.masked_log_softmax(logits, value_mask, dim=-1)
+            # logger.info("masked logits")
+            # logger.info(logits)
             loss = F.nll_loss(logits, value_ids.reshape(-1), ignore_index=-1, reduction='sum') / batch
+            # logger.info("loss:")
+            # logger.info(loss)
         else:
             loss = F.cross_entropy(logits, value_ids.reshape(-1), ignore_index=-1, reduction='sum') / batch
 
