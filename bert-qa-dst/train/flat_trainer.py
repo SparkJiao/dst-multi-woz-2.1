@@ -37,7 +37,8 @@ class BertQADst(nn.Module):
             outputs = []
             for slot_index in range(slot_dim):
                 output = self.model(input_ids[:, :, slot_index], token_type_ids[:, :, slot_index], input_mask[:, :, slot_index],
-                                    dialog_mask, self.value_embedding[slot_index].weight,
+                                    dialog_mask,
+                                    self.value_embedding[slot_index].weight.unsqueeze(0).expand(input_ids.size(0), -1, -1),
                                     value_ids=value_ids[:, :, slot_index])
                 outputs.append(output)
 

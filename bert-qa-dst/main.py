@@ -108,7 +108,7 @@ def train(_config, train_meta_data, train_data_loader, eval_meta_data, eval_data
                 summary_writer.add_scalar(f"lr", scheduler.get_lr()[0], global_step)
 
                 if global_step % _config["per_eval_step"] == 0:
-                    eval_metric = evaluate(_config, model, eval_meta_data, eval_data_loader)
+                    eval_metric = evaluate(_config, eval_meta_data, eval_data_loader, model)
                     logger.info(f"Eval at {eval_cnt} times:")
                     for k, v in eval_metric:
                         summary_writer.add_scalar(f"eval/{k}", scalar_value=v, global_step=eval_cnt)
