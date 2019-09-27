@@ -65,4 +65,20 @@ class MultiWOZReader:
                             slot_temp = [k for k in self.SLOTS if args.only_domain in k]
                             turn_belief_dict = OrderedDict([(k, v) for k, v in turn_belief_dict.items() if args.only_domain in k])
 
-                    turn_belief_list =
+                    turn_belief_list = [str(k) + '-' + str(v) for k, v in turn_belief_dict.items()]
+
+                    class_label, generate_y, slot_mask, gating_label = [], [], [], []
+                    for slot in slot_temp:
+                        if slot in turn_belief_dict.keys():
+                            generate_y.append(turn_belief_dict[slot])
+
+                            if turn_belief_dict[slot] == "dontcare":
+                                gating_label.append(self.gating_vocab["dontcare"])
+                            elif turn_belief_dict[slot] == "none":
+                                gating_label.append(self.gating_vocab["none"])
+                            else:
+                                gating_label.append(self.gating_vocab["ptr"])
+                        else:
+                            generate_y.append("none")
+                            gating_label.append(self.gating_vocab["none"])
+
