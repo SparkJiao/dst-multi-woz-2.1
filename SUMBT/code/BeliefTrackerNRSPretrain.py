@@ -11,6 +11,28 @@ from pytorch_pretrained_bert.modeling import BertModel
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 
 
+def masked_softmax(vector: torch.Tensor,
+                   mask: torch.Tensor,
+                   dim: int = -1,
+                   memory_efficient: bool = False,
+                   mask_fill_value: float = -1e32) -> torch.Tensor:
+    if mask is None:
+        result = torch.nn.functional.softmax(vector, dim=dim)
+    else:
+        mask = mask.to(vector.dtype)
+        while mask.dim() < vector.dim():
+            mask = mask.unsqueeze(1)
+        if not memory_efficient:
+            # To limit numerical errors from large vector elements outside the mask, we zero these out.
+            result = torch.nn.functional.softmax(vector * mask, dim=dim)
+            result = result * mask
+            result = result / (result.sum(dim=dim, keepdim=True) + 1e-13)
+        else:
+            masked_vector = vector.masked_fill((1 - mask).byte(), mask_fill_value)
+            result = torch.nn.functional.softmax(masked_vector, dim=dim)
+    return result
+
+
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config):
         super(BertForUtteranceEncoding, self).__init__(config)
@@ -43,8 +65,9 @@ class MultiHeadAttention(nn.Module):
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
 
         if mask is not None:
-            mask = mask.unsqueeze(1)
-            scores = scores.masked_fill(mask == 0, -1e9)
+            # mask = mask.unsqueeze(1)
+            # scores = scores.masked_fill(mask == 0, -1e9)
+            scores = masked_softmax(scores, mask.unsqueeze(1), dim=-1)
         scores = F.softmax(scores, dim=-1)
 
         if dropout is not None:
@@ -191,17 +214,6 @@ class BeliefTracker(nn.Module):
         # [batch * max_turns, 1, h] -> [batch, max_turns, h]
         hidden = self.attn(query, dialog_hidden, dialog_hidden,
                            mask=dialog_input_mask.view(-1, 1, self.max_seq_length)).reshape(batch, max_turns, -1)
-
-        # hidden = torch.mul(hidden, attention_mask.view(-1, self.max_seq_length, 1).expand(hidden.size()).float())
-        # hidden = hidden.repeat(slot_dim, 1, 1)  # [(slot_dim*ds*ts), bert_seq, hid_size]
-        #
-        # hid_slot = self.slot_lookup.weight[target_slot, :]  # Select target slot embedding
-        # hid_slot = hid_slot.repeat(1, bs).view(bs * slot_dim, -1)  # [(slot_dim*ds*ts), bert_seq, hid_size]
-        #
-        # # Attended utterance vector
-        # hidden = self.attn(hid_slot, hidden, hidden, mask=attention_mask.view(-1, 1, self.max_seq_length).repeat(slot_dim, 1, 1))
-        # hidden = hidden.squeeze()  # [slot_dim*ds*ts, bert_dim]
-        # hidden = hidden.view(slot_dim, ds, ts, -1).view(-1, ts, self.bert_output_dim)
 
         # NBT
         if self.zero_init_rnn:

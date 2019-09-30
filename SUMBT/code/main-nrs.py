@@ -657,9 +657,6 @@ def main():
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             # Train
             model.train()
-            tr_loss = 0
-            nb_tr_examples = 0
-            nb_tr_steps = 0
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = {k: v.to(device) for k, v in batch.items()}
