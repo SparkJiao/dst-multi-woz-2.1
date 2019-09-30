@@ -155,9 +155,8 @@ class BeliefTracker(nn.Module):
 
     def _encoding_query_response(self, query_input_ids, query_token_type_ids, query_input_mask,
                                  sample_input_ids, sample_token_type_ids, sample_input_mask, flat: bool = True):
-        batch, max_query_num, max_query_length = query_input_ids.size()
-        sample_num = sample_input_ids.size(2)
-        assert sample_input_ids.size(1) == max_query_num
+        batch, max_query_length = query_input_ids.size()
+        sample_num = sample_input_ids.size(1)
 
         self.sv_encoder.eval()
         query, _ = self.sv_encoder(input_ids=self._flat_tensor(query_input_ids),
@@ -166,43 +165,47 @@ class BeliefTracker(nn.Module):
         query = query[:, 0]
         response, _ = self.sv_encoder(input_ids=self._flat_tensor(sample_input_ids),
                                       token_type_ids=self._flat_tensor(sample_token_type_ids),
-                                      attention_mask=self._flat_tensor(sample_input_mask))[:, 0]
+                                      attention_mask=self._flat_tensor(sample_input_mask))
         response = response[:, 0]
         if flat:
             return query, response
         else:
-            return query.reshape(batch, max_query_num, -1), response.reshape(batch, max_query_num, sample_num, -1)
+            return query, response.reshape(batch, sample_num, -1)
 
-    def forward(self, dialog_input_ids, dialog_token_type_ids, dialog_input_mask,
+    def forward(self, dialog_input_ids, dialog_token_type_ids, dialog_input_mask, dialog_mask,
                 query_input_ids, query_token_type_ids, query_input_mask,
                 sample_input_ids, sample_token_type_ids, sample_input_mask,
-                query_mask, labels, start_index):
-        start_index = start_index[0]
+                end_index, label):
         batch, max_turns, max_seq_length = dialog_input_ids.size()
-        max_query_num = query_input_ids.size(1)
-        sample_num = sample_input_ids.size(2)
+        sample_num = sample_input_ids.size(1)
         dialog_hidden, _ = self.utterance_encoder(input_ids=self._flat_tensor(dialog_input_ids),
                                                   token_type_ids=self._flat_tensor(dialog_token_type_ids),
                                                   attention_mask=self._flat_tensor(dialog_input_mask))
 
-        dialog_hidden = dialog_hidden.reshape(batch, max_turns, max_seq_length, -1)
-        dialog_hidden = dialog_hidden[:, ]
+        # dialog_hidden = dialog_hidden.reshape(batch, max_turns, max_seq_length, -1)
 
-        hidden = torch.mul(hidden, attention_mask.view(-1, self.max_seq_length, 1).expand(hidden.size()).float())
-        hidden = hidden.repeat(slot_dim, 1, 1)  # [(slot_dim*ds*ts), bert_seq, hid_size]
+        query, response = self._encoding_query_response(query_input_ids, query_token_type_ids, query_input_mask,
+                                                        sample_input_ids, sample_token_type_ids, sample_input_mask,
+                                                        flat=False)
+        query = query.unsqueeze(1).expand(-1, max_turns, -1).reshape(batch * max_turns, -1)
+        # [batch * max_turns, 1, h] -> [batch, max_turns, h]
+        hidden = self.attn(query, dialog_hidden, dialog_hidden,
+                           mask=dialog_input_mask.view(-1, 1, self.max_seq_length)).reshape(batch, max_turns, -1)
 
-        hid_slot = self.slot_lookup.weight[target_slot, :]  # Select target slot embedding
-        hid_slot = hid_slot.repeat(1, bs).view(bs * slot_dim, -1)  # [(slot_dim*ds*ts), bert_seq, hid_size]
-
-        # Attended utterance vector
-        hidden = self.attn(hid_slot, hidden, hidden, mask=attention_mask.view(-1, 1, self.max_seq_length).repeat(slot_dim, 1, 1))
-        hidden = hidden.squeeze()  # [slot_dim*ds*ts, bert_dim]
-        hidden = hidden.view(slot_dim, ds, ts, -1).view(-1, ts, self.bert_output_dim)
+        # hidden = torch.mul(hidden, attention_mask.view(-1, self.max_seq_length, 1).expand(hidden.size()).float())
+        # hidden = hidden.repeat(slot_dim, 1, 1)  # [(slot_dim*ds*ts), bert_seq, hid_size]
+        #
+        # hid_slot = self.slot_lookup.weight[target_slot, :]  # Select target slot embedding
+        # hid_slot = hid_slot.repeat(1, bs).view(bs * slot_dim, -1)  # [(slot_dim*ds*ts), bert_seq, hid_size]
+        #
+        # # Attended utterance vector
+        # hidden = self.attn(hid_slot, hidden, hidden, mask=attention_mask.view(-1, 1, self.max_seq_length).repeat(slot_dim, 1, 1))
+        # hidden = hidden.squeeze()  # [slot_dim*ds*ts, bert_dim]
+        # hidden = hidden.view(slot_dim, ds, ts, -1).view(-1, ts, self.bert_output_dim)
 
         # NBT
         if self.zero_init_rnn:
-            h = torch.zeros(self.rnn_num_layers, input_ids.shape[0] * slot_dim, self.hidden_dim).to(
-                self.device)  # [1, slot_dim*ds, hidden]
+            h = torch.zeros(self.rnn_num_layers, batch, self.hidden_dim).to(self.device)  # [1, slot_dim*ds, hidden]
         else:
             h = hidden[:, 0, :].unsqueeze(0).repeat(self.rnn_num_layers, 1, 1)
             h = self.rnn_init_linear(h)
@@ -210,57 +213,74 @@ class BeliefTracker(nn.Module):
         if isinstance(self.nbt, nn.GRU):
             rnn_out, _ = self.nbt(hidden, h)  # [slot_dim*ds, turn, hidden]
         elif isinstance(self.nbt, nn.LSTM):
-            c = torch.zeros(self.rnn_num_layers, input_ids.shape[0] * slot_dim, self.hidden_dim).to(
-                self.device)  # [1, slot_dim*ds, hidden]
+            c = torch.zeros(self.rnn_num_layers,  batch, self.hidden_dim).to(self.device)  # [1, slot_dim*ds, hidden]
             rnn_out, _ = self.nbt(hidden, (h, c))  # [slot_dim*ds, turn, hidden]
-        rnn_out = self.layer_norm(self.linear(self.dropout(rnn_out)))
-
-        hidden = rnn_out.view(slot_dim, ds, ts, -1)
-
-        # Label (slot-value) encoding
-        loss = 0
-        loss_slot = []
-        pred_slot = []
-        output = []
-        for s, slot_id in enumerate(target_slot):  ## note: target_slots are successive
-            # loss calculation
-            hid_label = self.value_lookup[slot_id].weight
-            num_slot_labels = hid_label.size(0)
-
-            _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
-            _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(ds * ts * num_slot_labels, -1)
-            _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
-
-            if self.distance_metric == "euclidean":
-                _dist = -_dist
-            _, pred = torch.max(_dist, -1)
-            pred_slot.append(pred.view(ds, ts, 1))
-            output.append(_dist)
-
-            if labels is not None:
-                """ FIX_UNDEFINED: Mask all undefined values """
-                undefined_value_mask = (labels[:, :, s] == num_slot_labels)
-                masked_slot_labels_for_loss = labels[:, :, s].masked_fill(undefined_value_mask, -1)
-
-                _loss = self.nll(_dist.view(ds * ts, -1), masked_slot_labels_for_loss.view(-1))
-                loss_slot.append(_loss.item())
-                loss += _loss
-
-        if labels is None:
-            return output
-
-        # calculate joint accuracy
-        pred_slot = torch.cat(pred_slot, 2)
-        accuracy = (pred_slot == labels).view(-1, slot_dim)
-        acc_slot = torch.sum(accuracy, 0).float() \
-                   / torch.sum(labels.view(-1, slot_dim) > -1, 0).float()
-        acc = sum(torch.sum(accuracy, 1) / slot_dim).float() \
-              / torch.sum(labels[:, :, 0].view(-1) > -1, 0).float()  # joint accuracy
-
-        if n_gpu == 1:
-            return loss, loss_slot, acc, acc_slot, pred_slot
         else:
-            return loss.unsqueeze(0), None, acc.unsqueeze(0), acc_slot.unsqueeze(0), pred_slot.unsqueeze(0)
+            raise RuntimeError(f'Wrong neural belief tracker type for {self.nbt.__class__}')
+        rnn_out = self.layer_norm(self.linear(self.dropout(rnn_out)))
+        index = end_index.unsqueeze(1).expand(-1, self.bert_output_dim).unsqueeze(1)
+        last_utt_h = rnn_out.gather(index=index, dim=1)
+        _dist = self.metric(response, last_utt_h)
+        # assert _dist.size() == (batch, sample_num), _dist.size()
+        if self.distance_metric == "euclidean":
+            _dist = -_dist
+        output = {
+            'logits': _dist
+        }
+        if label is not None:
+            loss = self.nll(_dist, label)
+            output['loss'] = loss
+        # if n_gpu == 1:
+        #     output = {k: v.unsqueeze(0) for k, v in output.items()}
+        return output
+
+
+        # hidden = rnn_out.view(slot_dim, ds, ts, -1)
+        #
+        # # Label (slot-value) encoding
+        # loss = 0
+        # loss_slot = []
+        # pred_slot = []
+        # output = []
+        # for s, slot_id in enumerate(target_slot):  ## note: target_slots are successive
+        #     # loss calculation
+        #     hid_label = self.value_lookup[slot_id].weight
+        #     num_slot_labels = hid_label.size(0)
+        #
+        #     _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
+        #     _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(ds * ts * num_slot_labels, -1)
+        #     _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
+        #
+        #     if self.distance_metric == "euclidean":
+        #         _dist = -_dist
+        #     _, pred = torch.max(_dist, -1)
+        #     pred_slot.append(pred.view(ds, ts, 1))
+        #     output.append(_dist)
+        #
+        #     if labels is not None:
+        #         """ FIX_UNDEFINED: Mask all undefined values """
+        #         undefined_value_mask = (labels[:, :, s] == num_slot_labels)
+        #         masked_slot_labels_for_loss = labels[:, :, s].masked_fill(undefined_value_mask, -1)
+        #
+        #         _loss = self.nll(_dist.view(ds * ts, -1), masked_slot_labels_for_loss.view(-1))
+        #         loss_slot.append(_loss.item())
+        #         loss += _loss
+        #
+        # if labels is None:
+        #     return output
+        #
+        # # calculate joint accuracy
+        # pred_slot = torch.cat(pred_slot, 2)
+        # accuracy = (pred_slot == labels).view(-1, slot_dim)
+        # acc_slot = torch.sum(accuracy, 0).float() \
+        #            / torch.sum(labels.view(-1, slot_dim) > -1, 0).float()
+        # acc = sum(torch.sum(accuracy, 1) / slot_dim).float() \
+        #       / torch.sum(labels[:, :, 0].view(-1) > -1, 0).float()  # joint accuracy
+        #
+        # if n_gpu == 1:
+        #     return loss, loss_slot, acc, acc_slot, pred_slot
+        # else:
+        #     return loss.unsqueeze(0), None, acc.unsqueeze(0), acc_slot.unsqueeze(0), pred_slot.unsqueeze(0)
 
     @staticmethod
     def init_parameter(module):
