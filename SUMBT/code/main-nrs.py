@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import Dataset, DataLoader
 
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam
@@ -220,21 +221,44 @@ def convert_examples_to_features(examples, max_seq_length, max_query_length, tok
     return features
 
 
-def generate_inputs(features):
-    inputs = {
-        "dialog_input_ids": torch.LongTensor([f.dialog_input_ids for f in features]),
-        "dialog_token_type_ids": torch.LongTensor([f.dialog_token_type_ids for f in features]),
-        "dialog_input_mask": torch.LongTensor([f.dialog_input_mask for f in features]),
-        "query_input_ids": torch.LongTensor([f.query_input_ids for f in features]),
-        "query_token_type_ids": torch.LongTensor([f.query_token_type_ids for f in features]),
-        "query_input_mask": torch.LongTensor([f.query_input_mask for f in features]),
-        "sample_input_ids": torch.LongTensor([f.sample_input_ids for f in features]),
-        "sample_token_type_ids": torch.LongTensor([f.sample_token_type_ids for f in features]),
-        "sample_input_mask": torch.LongTensor([f.sample_input_mask for f in features]),
-        "query_mask": torch.LongTensor([f.query_mask for f in features]),
-        "labels": torch.LongTensor([f.labels for f in features])
-    }
-    return inputs
+class NRSDataset(Dataset):
+    def __init__(self, input_features):
+        super(NRSDataset, self).__init__()
+        self.inputs = self.generate_inputs(input_features)
+        self.length = self.inputs["dialog_input_ids"].size(0)
+
+    def __getitem__(self, index):
+        item = {k: v[index] for k, v in self.inputs.items()}
+        return item
+
+    def __len__(self):
+        return self.length
+
+    @staticmethod
+    def generate_inputs(features: List[InputFeatures]):
+        inputs = {
+            # [data_len, max_turns, max_seq_length]
+            "dialog_input_ids": torch.LongTensor([f.dialog_input_ids for f in features]),
+            "dialog_token_type_ids": torch.LongTensor([f.dialog_token_type_ids for f in features]),
+            "dialog_input_mask": torch.LongTensor([f.dialog_input_mask for f in features]),
+            # [data_len, max_query_num, max_query_length]
+            "query_input_ids": torch.LongTensor([f.query_input_ids for f in features]),
+            "query_token_type_ids": torch.LongTensor([f.query_token_type_ids for f in features]),
+            "query_input_mask": torch.LongTensor([f.query_input_mask for f in features]),
+            # [data_len, max_query_num, sample_num, max_query_length]
+            "sample_input_ids": torch.LongTensor([f.sample_input_ids for f in features]),
+            "sample_token_type_ids": torch.LongTensor([f.sample_token_type_ids for f in features]),
+            "sample_input_mask": torch.LongTensor([f.sample_input_mask for f in features]),
+            # [data_len, max_query_num]
+            "query_mask": torch.LongTensor([f.query_mask for f in features]),
+            "labels": torch.LongTensor([f.labels for f in features]),
+            # [data_len]
+            "start_index": torch.LongTensor([f.start_index for f in features])
+        }
+        _start_index = inputs["start_index"][0]
+        for x in _start_index:
+            assert x == _start_index
+        return inputs
 
 
 def _generate_single_input(sequence, max_seq_length, tokenizer):
@@ -277,17 +301,9 @@ def warmup_linear(x, warmup=0.002):
 
 
 def main():
-    """
-    This script fix the undefined values in ontology. Please search "FIX_UNDEFINED" to find the difference with `main-multislot.py`
-
-    For undefined values, we address `undefined` as the last possible value for each slot and remove its embedding.
-    Therefore we can mask their label ids as the ignore_index while computing loss,
-    so the undefined value will not have an influence on gradient and while computing
-    accuracy, they will be computed as wrong for the model never 'seen' undefined value.
-    """
     parser = argparse.ArgumentParser()
 
-    ## Required parameters
+    # Required parameters
     parser.add_argument("--data_dir",
                         default=None,
                         type=str,
@@ -311,11 +327,6 @@ def main():
                         type=str,
                         required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
-    parser.add_argument("--target_slot",
-                        default='all',
-                        type=str,
-                        required=True,
-                        help="Target slot idx to train model. ex. 'all', '0:1:2', or an excluding slot name 'attraction'")
     parser.add_argument("--tf_dir",
                         default='tensorboard',
                         type=str,
@@ -330,14 +341,14 @@ def main():
                         action='store_true',
                         help="Do not train BERT utterance encoder")
 
-    ## Other parameters
+    # Other parameters
     parser.add_argument("--max_seq_length",
                         default=64,
                         type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. \n"
                              "Sequences longer than this will be truncated, and sequences shorter \n"
                              "than this will be padded.")
-    parser.add_argument("--max_label_length",
+    parser.add_argument("--max_query_length",
                         default=32,
                         type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. \n"
@@ -498,45 +509,36 @@ def main():
     accumulation = False
 
     if args.do_train:
-        train_examples = processor.get_train_examples(args.data_dir, accumulation=accumulation)
-        dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation)
+        train_examples = processor.get_train_examples(args.data_dir)
+        dev_examples = processor.get_dev_examples(args.data_dir)
 
-        ## Training utterances
-        all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
-            train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
+        # Training utterances
+        train_features = convert_examples_to_features(train_examples, args.max_seq_length, args.max_query_length, tokenizer)
+        train_data = NRSDataset(train_features)
+        num_train_steps = int(len(train_data) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
-        num_train_features = all_input_ids.size(0)
-        num_train_steps = int(num_train_features / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
-
-        logger.info("***** Running training *****")
+        logger.info("***** Training Statistics *****")
         logger.info("  Num examples = %d", len(train_examples))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_steps)
 
-        # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
-
-        train_data = TensorDataset(all_input_ids, all_input_len, all_label_ids)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
             train_sampler = DistributedSampler(train_data)
 
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
+        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=4)
 
-        ## Dev utterances
-        all_input_ids_dev, all_input_len_dev, all_label_ids_dev = convert_examples_to_features(
-            dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-        num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
+        # Dev utterances
+        dev_features = convert_examples_to_features(dev_examples, args.max_seq_length, args.max_query_length, tokenizer)
+        dev_data = NRSDataset(dev_features)
+        num_dev_steps = int(len(dev_data) / args.dev_batch_size * args.num_train_epochs)
 
-        logger.info("***** Running validation *****")
+        logger.info("***** Validation Statistics *****")
         logger.info("  Num examples = %d", len(dev_examples))
         logger.info("  Batch size = %d", args.dev_batch_size)
         logger.info("  Num steps = %d", num_dev_steps)
 
-        # all_input_ids_dev, all_input_len_dev, all_label_ids_dev = \
-        #     all_input_ids_dev.to(device), all_input_len_dev.to(device), all_label_ids_dev.to(device)
-
-        dev_data = TensorDataset(all_input_ids_dev, all_input_len_dev, all_label_ids_dev)
         dev_sampler = SequentialSampler(dev_data)
         dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
 
