@@ -454,6 +454,7 @@ def main():
     parser.add_argument("--do_not_use_tensorboard",
                         action='store_true',
                         help="Whether to run eval on the test set.")
+    parser.add_argument('--fp16_opt_level', type=str, default='O1')
 
     args = parser.parse_args()
 
@@ -549,7 +550,7 @@ def main():
             train_sampler = DistributedSampler(train_data)
 
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size,
-                                      num_workers=4)
+                                      num_workers=8)
 
         # Dev utterances
         dev_features = convert_examples_to_features(dev_examples, args.max_seq_length, args.max_query_length, tokenizer)
@@ -562,7 +563,7 @@ def main():
         logger.info("  Num steps = %d", num_dev_steps)
 
         dev_sampler = SequentialSampler(dev_data)
-        dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
+        dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size, num_workers=8)
 
     logger.info("Loaded data!")
 
@@ -579,8 +580,8 @@ def main():
         raise ValueError('nbt type should be either rnn or transformer')
 
     model = BeliefTracker(args, device)
-    if args.fp16:
-        model.half()
+    # if args.fp16:
+    #     model.half()
     model.to(device)
 
     # Data parallelize when use multi-gpus
@@ -617,28 +618,34 @@ def main():
 
         if args.local_rank != -1:
             t_total = t_total // torch.distributed.get_world_size()
+
+        optimizer = BertAdam(optimizer_grouped_parameters,
+                             lr=args.learning_rate,
+                             warmup=args.warmup_proportion,
+                             t_total=t_total)
+
         if args.fp16:
+            # try:
+            #     from apex.optimizers import FP16_Optimizer
+            #     from apex.optimizers import FusedAdam
+            # except ImportError:
+            #     raise ImportError(
+            #         "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+            #
+            # optimizer = FusedAdam(optimizer_grouped_parameters,
+            #                       lr=args.learning_rate,
+            #                       bias_correction=False,
+            #                       max_grad_norm=1.0)
+            # if args.loss_scale == 0:
+            #     optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
+            # else:
+            #     optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
             try:
-                from apex.optimizers import FP16_Optimizer
-                from apex.optimizers import FusedAdam
+                from apex import amp
             except ImportError:
-                raise ImportError(
-                    "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+                raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+            model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
-            optimizer = FusedAdam(optimizer_grouped_parameters,
-                                  lr=args.learning_rate,
-                                  bias_correction=False,
-                                  max_grad_norm=1.0)
-            if args.loss_scale == 0:
-                optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
-            else:
-                optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
-
-        else:
-            optimizer = BertAdam(optimizer_grouped_parameters,
-                                 lr=args.learning_rate,
-                                 warmup=args.warmup_proportion,
-                                 t_total=t_total)
         logger.info(optimizer)
 
     ###############################################################################
@@ -654,11 +661,11 @@ def main():
         eval_accuracy = CategoricalAccuracy()
         eval_loss = Average()
 
-        for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
+        for epoch in range(int(args.num_train_epochs)):
             # Train
             model.train()
 
-            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
                 batch = {k: v.to(device) for k, v in batch.items()}
 
                 model_output = model(**batch)
@@ -673,7 +680,9 @@ def main():
 
                 # Backward
                 if args.fp16:
-                    optimizer.backward(loss)
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
                 else:
                     loss.backward()
 
@@ -697,7 +706,7 @@ def main():
             # Perform evaluation on validation dataset
             model.eval()
 
-            for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation")):
+            for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
                 batch = {k: v.to(device) for k, v in batch.items()}
 
                 with torch.no_grad():
