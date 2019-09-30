@@ -695,7 +695,7 @@ def main():
 
                     if summary_writer is not None:
                         summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
-                        summary_writer.add_scalar("Train/Loss", loss.item, global_step)
+                        summary_writer.add_scalar("Train/Loss", loss.item(), global_step)
 
             # Perform evaluation on validation dataset
             model.eval()
