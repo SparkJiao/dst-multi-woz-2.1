@@ -93,9 +93,6 @@ class Processor(DataProcessor):
         data = json.load(open(input_file, 'r'))
         examples: List[InputExample] = []
         for dialog_idx, dialog_examples in tqdm(enumerate(data), desc='Reading examples...'):
-            # start_index = dialog_examples['querys'][0]['start_index']
-            # for x in dialog_examples['querys']:
-            #     assert start_index == x['start_index']
             examples.append(InputExample(
                 guid=f'd#{dialog_idx}',
                 dialog=dialog_examples['dialog'],
@@ -155,34 +152,6 @@ def convert_examples_to_features(examples: List[InputExample], max_seq_length, m
             dialog_input_mask.append(pair_mask_padding + [0] * (max_seq_length - 3))
             dialog_mask.append(0)
 
-        # Query
-        # query_input_ids = []
-        # query_token_type_ids = []
-        # query_input_mask = []
-        # query_mask = []
-        # for query in example.queries:
-        #     # query_tokens = tokenizer.tokenize(query)
-        #     # if len(query_tokens) > max_query_length - 2:
-        #     #     query_tokens = query_tokens[-(max_seq_length - 2):]
-        #     #     truncate_q += 1
-        #     # input_ids = tokenizer.convert_tokens_to_ids(['[CLS]'] + query_tokens + ['[SEP]'])
-        #     # type_ids = [0] * len(input_ids)
-        #     # mask = [1] * len(input_ids)
-        #     # while len(input_ids) < max_query_length:
-        #     #     input_ids.append(0)
-        #     #     type_ids.append(0)
-        #     #     mask.append(0)
-        #     input_ids, type_ids, mask, truncates = _generate_single_input(query, max_query_length, tokenizer)
-        #     truncate_q += truncates
-        #     query_input_ids.append(input_ids)
-        #     query_token_type_ids.append(type_ids)
-        #     query_input_mask.append(mask)
-        #     query_mask.append(1)
-        # while len(query_input_ids) < max_query_num:
-        #     query_input_ids.append(token_padding + [0] * (max_query_length - 2))
-        #     query_token_type_ids.append(token_type_padding + [0] * (max_query_length - 2))
-        #     query_input_mask.append(token_mask_padding + [0] * (max_query_length - 2))
-        #     query_mask.append(0)
         query_input_ids, query_token_type_ids, query_input_mask, truncates = _generate_single_input(example.query,
                                                                                                     max_query_length,
                                                                                                     tokenizer)
@@ -198,31 +167,6 @@ def convert_examples_to_features(examples: List[InputExample], max_seq_length, m
             sample_token_type_ids.append(type_ids)
             sample_input_mask.append(mask)
             truncate_s += truncates
-
-        #     input_ids = []  # sample_num * max_query_length
-        #     type_ids = []
-        #     mask = []
-        #     for sample in samples:
-        #         tmp_input, tmp_type, tmp_mask, tmp_truncate = _generate_single_input(sample, max_query_length,
-        #                                                                              tokenizer)
-        #         input_ids.append(tmp_input)
-        #         type_ids.append(tmp_type)
-        #         mask.append(tmp_mask)
-        #         truncate_s += tmp_truncate
-        #     sample_input_ids.append(input_ids)
-        #     sample_token_type_ids.append(type_ids)
-        #     sample_input_mask.append(mask)
-        # sample_padding = (
-        #     [token_padding + [0] * (max_query_length - 2)] * sample_num,
-        #     [token_type_padding + [0] * (max_query_length - 2)] * sample_num,
-        #     [token_mask_padding + [0] * (max_query_length - 2)] * sample_num
-        # )
-        # while len(sample_input_ids) < max_query_num:
-        #     sample_input_ids.append(sample_padding[0])
-        #     sample_token_type_ids.append(sample_padding[1])
-        #     sample_input_mask.append(sample_padding[2])
-
-        # labels = example.labels + [-1] * (max_query_num - len(example.labels))
 
         features.append(InputFeatures(dialog_input_ids=dialog_input_ids, dialog_token_type_ids=dialog_token_type_ids,
                                       dialog_input_mask=dialog_input_mask, dialog_mask=dialog_mask,
@@ -455,6 +399,7 @@ def main():
                         action='store_true',
                         help="Whether to run eval on the test set.")
     parser.add_argument('--fp16_opt_level', type=str, default='O1')
+    parser.add_argument('--model_id', type=int, default=1)
 
     args = parser.parse_args()
 
@@ -573,7 +518,12 @@ def main():
 
     # Prepare model
     if args.nbt == 'rnn':
-        from BeliefTrackerNRSPretrain import BeliefTracker
+        if args.model_id == 1:
+            from BeliefTrackerNRSPretrain import BeliefTracker
+        elif args.model_id == 2:
+            from BeliefTrackerNRSPretrain2 import BeliefTracker
+        else:
+            raise RuntimeError()
     # elif args.nbt == 'transformer':
     #     from BeliefTrackerSlotQueryMultiSlotTransformer import BeliefTracker
     else:
