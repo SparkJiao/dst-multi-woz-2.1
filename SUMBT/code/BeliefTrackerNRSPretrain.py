@@ -159,6 +159,13 @@ class BeliefTracker(nn.Module):
         self.linear = nn.Linear(self.hidden_dim, self.bert_output_dim)
         self.layer_norm = nn.LayerNorm(self.bert_output_dim)
 
+        # Consider query vector into similarity computing.
+        if args.use_query:
+            print("Consider query vector into similarity computing.")
+            self.query_map = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+        else:
+            self.query_map = None
+
         # Measure
         self.distance_metric = args.distance_metric
         if self.distance_metric == "cosine":
@@ -210,9 +217,9 @@ class BeliefTracker(nn.Module):
         query, response = self._encoding_query_response(query_input_ids, query_token_type_ids, query_input_mask,
                                                         sample_input_ids, sample_token_type_ids, sample_input_mask,
                                                         flat=False)
-        query = query.unsqueeze(1).expand(-1, max_turns, -1).reshape(batch * max_turns, -1)
+        extended_query = query.unsqueeze(1).expand(-1, max_turns, -1).reshape(batch * max_turns, -1)
         # [batch * max_turns, 1, h] -> [batch, max_turns, h]
-        hidden = self.attn(query, dialog_hidden, dialog_hidden,
+        hidden = self.attn(extended_query, dialog_hidden, dialog_hidden,
                            mask=dialog_input_mask.view(-1, 1, self.max_seq_length)).reshape(batch, max_turns, -1)
 
         # NBT
@@ -229,9 +236,15 @@ class BeliefTracker(nn.Module):
             rnn_out, _ = self.nbt(hidden, (h, c))  # [slot_dim*ds, turn, hidden]
         else:
             raise RuntimeError(f'Wrong neural belief tracker type for {self.nbt.__class__}')
-        rnn_out = self.layer_norm(self.linear(self.dropout(rnn_out)))
-        index = end_index.unsqueeze(1).expand(-1, self.bert_output_dim).unsqueeze(1)
+
+        # rnn_out = self.layer_norm(self.linear(self.dropout(rnn_out)))
+        index = end_index.unsqueeze(1).expand(-1, self.hidden_dim).unsqueeze(1)
         last_utt_h = rnn_out.gather(index=index, dim=1)
+        last_utt_h = self.layer_norm(self.linear(self.dropout(last_utt_h)))
+
+        if self.query_map:
+            last_utt_h = self.query_map(torch.cat([query.unsqueeze(1), last_utt_h], dim=-1))
+
         _dist = self.metric(response, last_utt_h)
         # assert _dist.size() == (batch, sample_num), _dist.size()
         if self.distance_metric == "euclidean":
