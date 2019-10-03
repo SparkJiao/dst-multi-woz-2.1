@@ -529,6 +529,8 @@ def main():
                         action='store_true',
                         help="Whether to run eval on the test set.")
     parser.add_argument('--pretrain', type=str, default=None)
+    parser.add_argument('--model_id', type=int, default=1)
+    parser.add_argument('--use_query', default=False, action='store_true')
 
     args = parser.parse_args()
 

@@ -11,6 +11,12 @@ from pytorch_pretrained_bert.modeling import BertModel
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 
 
+try:
+    from . import layers
+except ImportError:
+    import layers
+
+
 def masked_softmax(vector: torch.Tensor,
                    mask: torch.Tensor,
                    dim: int = -1,
@@ -172,6 +178,8 @@ class BeliefTracker(nn.Module):
             self.metric = torch.nn.CosineSimilarity(dim=-1, eps=1e-08)
         elif self.distance_metric == "euclidean":
             self.metric = torch.nn.PairwiseDistance(p=2.0, eps=1e-06, keepdim=False)
+        elif self.distance_metric == 'product':
+            self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         # Classifier
         self.nll = CrossEntropyLoss(ignore_index=-1)
@@ -245,10 +253,12 @@ class BeliefTracker(nn.Module):
         if self.query_map:
             last_utt_h = self.query_map(torch.cat([query.unsqueeze(1), last_utt_h], dim=-1))
 
-        _dist = self.metric(response, last_utt_h)
+        _dist = self.metric(last_utt_h, response)
         # assert _dist.size() == (batch, sample_num), _dist.size()
         if self.distance_metric == "euclidean":
             _dist = -_dist
+        elif self.distance_metric == 'product':
+            _dist = _dist.squeeze(1)
         output = {
             'logits': _dist
         }
