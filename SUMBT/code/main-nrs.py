@@ -60,7 +60,7 @@ class InputFeatures(object):
 class DataProcessor(object):
     """Base class for data converters for sequence classification data sets."""
 
-    def get_train_examples(self, data_dir):
+    def get_train_examples(self, data_dir, override_file=None):
         """Gets a collection of `InputExample`s for the train set."""
         raise NotImplementedError()
 
@@ -75,9 +75,12 @@ class Processor(DataProcessor):
     def __init__(self, config):
         super(Processor, self).__init__()
 
-    def get_train_examples(self, data_dir):
+    def get_train_examples(self, data_dir, override_file=None):
         """See base class."""
-        return self._create_examples(os.path.join(data_dir, "train_nrs.json"))
+        if override_file is None:
+            return self._create_examples(os.path.join(data_dir, "train_nrs.json"))
+        else:
+            return self._create_examples(override_file)
 
     def get_dev_examples(self, data_dir):
         """See base class."""
@@ -99,7 +102,7 @@ class Processor(DataProcessor):
                 query=dialog_examples['query'],
                 label=dialog_examples['response_id'],
                 samples=dialog_examples['samples'],
-                end_index=dialog_examples['end_index']
+                end_index=dialog_examples['end_index'] - 1
             ))
         return examples
 
@@ -402,6 +405,8 @@ def main():
     parser.add_argument('--model_id', type=int, default=1)
     parser.add_argument('--use_query', default=False, action='store_true')
 
+    parser.add_argument('--train_file', default=None, type=str)
+
     args = parser.parse_args()
 
     # check output_dir
@@ -466,12 +471,15 @@ def main():
     num_train_steps = None
 
     if args.do_train:
-        train_examples = processor.get_train_examples(args.data_dir)
+        train_examples = processor.get_train_examples(args.data_dir, args.train_file)
         dev_examples = processor.get_dev_examples(args.data_dir)
 
         # Training utterances
-        cached_file_name = f'{os.path.join(args.data_dir, "train_nrs.json")}-{args.max_seq_length}-' \
-                           f'{args.max_query_length}-NSR'
+        if args.train_file:
+            cached_file_name = f'{args.train_file}-{args.max_seq_length}-{args.max_query_length}-NSR'
+        else:
+            cached_file_name = f'{os.path.join(args.data_dir, "train_nrs.json")}-{args.max_seq_length}-' \
+                               f'{args.max_query_length}-NSR'
         try:
             with open(cached_file_name, 'rb') as f:
                 train_features = pickle.load(f)
