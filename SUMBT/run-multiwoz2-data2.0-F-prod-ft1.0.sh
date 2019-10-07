@@ -11,5 +11,5 @@ python3 code/main-multislot-f.py --do_train --do_eval --num_train_epochs 50 --da
  --output_dir $output_dir --target_slot all --warmup_proportion 0.1 --learning_rate 5e-5 \
  --train_batch_size 3 --eval_batch_size 4 --distance_metric product --patience 15 --tf_dir tensorboard \
  --hidden_dim 300 --max_label_length 32 --max_seq_length 64 --max_turn_length 22 --use_query \
- --pretrain /home/jiaofangkai/dst-multi-woz-2.1/SUMBT/exp-multiwoz/NRS-1.4/pytorch_model.bin
+ --pretrain /home/jiaofangkai/dst-multi-woz-2.1/SUMBT/exp-multiwoz/model167/NRS-1.4/pytorch_model.bin
 
