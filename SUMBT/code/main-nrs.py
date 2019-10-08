@@ -14,6 +14,7 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import Dataset, DataLoader
+from torch.optim import Adam
 
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam
@@ -404,6 +405,8 @@ def main():
     parser.add_argument('--fp16_opt_level', type=str, default='O1')
     parser.add_argument('--model_id', type=int, default=1)
     parser.add_argument('--use_query', default=False, action='store_true')
+    parser.add_argument('--fix_bert', default=False, action='store_true')
+    parser.add_argument('--optimizer', default='bert_adam', type=str)
 
     parser.add_argument('--train_file', default=None, type=str)
 
@@ -479,7 +482,7 @@ def main():
             cached_file_name = f'{args.train_file}-{args.max_seq_length}-{args.max_query_length}-NSR'
         else:
             cached_file_name = f'{os.path.join(args.data_dir, "train_nrs.json")}-{args.max_seq_length}-' \
-                               f'{args.max_query_length}-NSR'
+                f'{args.max_query_length}-NSR'
         try:
             with open(cached_file_name, 'rb') as f:
                 train_features = pickle.load(f)
@@ -578,10 +581,15 @@ def main():
         if args.local_rank != -1:
             t_total = t_total // torch.distributed.get_world_size()
 
-        optimizer = BertAdam(optimizer_grouped_parameters,
-                             lr=args.learning_rate,
-                             warmup=args.warmup_proportion,
-                             t_total=t_total)
+        if args.optimizer == 'bert_adam':
+            optimizer = BertAdam(optimizer_grouped_parameters,
+                                 lr=args.learning_rate,
+                                 warmup=args.warmup_proportion,
+                                 t_total=t_total)
+        elif args.optimizer == 'adam':
+            optimizer = Adam(optimizer_grouped_parameters, lr=args.learning_rate)
+        else:
+            raise RuntimeError(f'Optimizer {args.optimizer} is not supported currently.')
 
         if args.fp16:
             # try:
@@ -648,9 +656,12 @@ def main():
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     # modify lealrning rate with special warm up BERT uses
                     # if args.fp16:
-                    lr_this_step = args.learning_rate * warmup_linear(global_step / t_total, args.warmup_proportion)
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = lr_this_step
+                    if args.optimizer == 'bert_adam':
+                        lr_this_step = args.learning_rate * warmup_linear(global_step / t_total, args.warmup_proportion)
+                        for param_group in optimizer.param_groups:
+                            param_group['lr'] = lr_this_step
+                    else:
+                        lr_this_step = optimizer.state_dict()['param_groups'][0]['lr']
                     # else:
                     #     if summary_writer is not None:
                     #         summary_writer.add_scalar("Train/LearningRate", optimizer.get_lr()[0], global_step)

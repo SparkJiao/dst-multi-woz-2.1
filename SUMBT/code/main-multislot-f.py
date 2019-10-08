@@ -531,6 +531,7 @@ def main():
     parser.add_argument('--pretrain', type=str, default=None)
     parser.add_argument('--model_id', type=int, default=1)
     parser.add_argument('--use_query', default=False, action='store_true')
+    parser.add_argument('--fix_bert', default=False, action='store_true')
 
     args = parser.parse_args()
 

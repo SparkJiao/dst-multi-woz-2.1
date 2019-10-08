@@ -106,6 +106,10 @@ class BeliefTracker(nn.Module):
         if args.fix_utterance_encoder:
             for p in self.utterance_encoder.bert.pooler.parameters():
                 p.requires_grad = False
+        if args.fix_bert:
+            print('Fix all parameters of bert encoder')
+            for p in self.utterance_encoder.bert.parameters():
+                p.requires_grad = False
 
         ### slot, slot-value Encoder (not trainable)
         self.sv_encoder = BertForUtteranceEncoding.from_pretrained(
