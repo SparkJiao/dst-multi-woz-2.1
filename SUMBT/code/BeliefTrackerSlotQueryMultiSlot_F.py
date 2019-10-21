@@ -11,6 +11,11 @@ from pytorch_pretrained_bert.modeling import BertModel
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 
 
+try:
+    from . import layers
+except ImportError:
+    import layers
+
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config):
         super(BertForUtteranceEncoding, self).__init__(config)
@@ -101,6 +106,10 @@ class BeliefTracker(nn.Module):
         if args.fix_utterance_encoder:
             for p in self.utterance_encoder.bert.pooler.parameters():
                 p.requires_grad = False
+        if args.fix_bert:
+            print('Fix all parameters of bert encoder')
+            for p in self.utterance_encoder.bert.parameters():
+                p.requires_grad = False
 
         ### slot, slot-value Encoder (not trainable)
         self.sv_encoder = BertForUtteranceEncoding.from_pretrained(
@@ -140,12 +149,21 @@ class BeliefTracker(nn.Module):
         self.linear = nn.Linear(self.hidden_dim, self.bert_output_dim)
         self.layer_norm = nn.LayerNorm(self.bert_output_dim)
 
+        # Consider query vector into similarity computing.
+        if args.use_query:
+            print("Consider query vector into similarity computing.")
+            self.query_map = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+        else:
+            self.query_map = None
+
         ### Measure
         self.distance_metric = args.distance_metric
         if self.distance_metric == "cosine":
             self.metric = torch.nn.CosineSimilarity(dim=-1, eps=1e-08)
         elif self.distance_metric == "euclidean":
             self.metric = torch.nn.PairwiseDistance(p=2.0, eps=1e-06, keepdim=False)
+        elif self.distance_metric == 'product':
+            self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         ### Classifier
         self.nll = CrossEntropyLoss(ignore_index=-1)
@@ -240,6 +258,9 @@ class BeliefTracker(nn.Module):
             rnn_out, _ = self.nbt(hidden, (h, c))  # [slot_dim*ds, turn, hidden]
         rnn_out = self.layer_norm(self.linear(self.dropout(rnn_out)))
 
+        if self.query_map:
+            rnn_out = self.query_map(torch.cat([hid_slot.reshape(slot_dim * ds, ts, -1), rnn_out], dim=2))
+
         hidden = rnn_out.view(slot_dim, ds, ts, -1)
 
         # Label (slot-value) encoding
@@ -252,9 +273,14 @@ class BeliefTracker(nn.Module):
             hid_label = self.value_lookup[slot_id].weight
             num_slot_labels = hid_label.size(0)
 
-            _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
-            _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(ds * ts * num_slot_labels, -1)
-            _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
+            if self.distance_metric == 'product':
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
+                _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
+                _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
+            else:
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
+                _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(ds * ts * num_slot_labels, -1)
+                _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
 
             if self.distance_metric == "euclidean":
                 _dist = -_dist

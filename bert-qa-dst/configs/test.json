@@ -1,0 +1,41 @@
+{
+    "output_dir": "experiments/bert-qa-dst/test",
+    "do_train": true,
+    "fp16": true,
+    "reader": {
+        "name": "multi_woz",
+        "vocab_file":"bert-base-uncased",
+        "ontology_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/ontology.json"
+    },
+    "read_train": {
+        "input_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/dev-f.tsv",
+        "max_seq_length": 64,
+        "batch_size": 4,
+        "flat_slot": true
+    },
+    "read_eval": {
+        "input_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/dev-f.tsv",
+        "max_seq_length": 64,
+        "batch_size": 4
+    },
+    "read_test": {
+        "input_file": "/home/jiaofangkai/dst-multi-woz-2.1/SUMBT/data/multiwoz2.0/test-f.tsv",
+        "max_seq_length": 64,
+        "batch_size": 4
+    },
+    "model": {
+        "name": "dialog_matching",
+        "bert_model": "/home/jiaofangkai/bert-base-uncased",
+        "dropout": 0.1,
+        "rnn_hidden_size": 768
+    },
+    "bert_model": "/home/jiaofangkai/bert-base-uncased",
+    "num_train_epochs": 5,
+    "learning_rate": 5e-5,
+    "gradient_accumulation_steps": 8,
+    "per_eval_step": 1000,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "warmup_steps": 1000,
+    "fp16_opt_level": "O2"
+}

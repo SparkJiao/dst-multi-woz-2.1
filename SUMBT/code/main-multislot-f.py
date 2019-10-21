@@ -8,6 +8,7 @@ from tqdm import tqdm, trange
 
 import numpy as np
 import torch
+from torch.nn import Parameter
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
@@ -356,6 +357,21 @@ def warmup_linear(x, warmup=0.002):
     return 1.0 - x
 
 
+def get_pretrain(model, state_dict):
+    own_state = model.state_dict()
+    for name, param in state_dict.items():
+        if name not in own_state:
+            continue
+        if isinstance(param, Parameter):
+            param = param.data
+        try:
+            own_state[name].copy_(param)
+        except:
+            print("Skip", name)
+            continue
+    return own_state
+
+
 def main():
     """
     This script fix the undefined values in ontology. Please search "FIX_UNDEFINED" to find the difference with `main-multislot.py`
@@ -512,6 +528,10 @@ def main():
     parser.add_argument("--do_not_use_tensorboard",
                         action='store_true',
                         help="Whether to run eval on the test set.")
+    parser.add_argument('--pretrain', type=str, default=None)
+    parser.add_argument('--model_id', type=int, default=1)
+    parser.add_argument('--use_query', default=False, action='store_true')
+    parser.add_argument('--fix_bert', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -642,6 +662,13 @@ def main():
         raise ValueError('nbt type should be either rnn or transformer')
 
     model = BeliefTracker(args, num_labels, device)
+
+    if args.pretrain is not None:
+        logger.info(f'Loading pre-trained model from {args.pretrain}')
+        pre_train = torch.load(args.pretrain)
+        pre_train_state_dict = get_pretrain(model, pre_train)
+        model.load_state_dict(pre_train_state_dict)
+
     if args.fp16:
         model.half()
     model.to(device)
