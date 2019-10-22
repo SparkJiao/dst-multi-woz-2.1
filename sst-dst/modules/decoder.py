@@ -1,9 +1,8 @@
-from torch import nn
-import torch
-from torch.nn import Transformer, TransformerDecoder, TransformerEncoder, TransformerDecoderLayer
-from transformers.modeling_bert import BertModel, BertPreTrainedModel, BertPreTrainingHeads
 import numpy as np
+import torch
+from torch import nn
 from torch.nn import functional as F
+from transformers.modeling_bert import BertModel, BertPreTrainedModel, BertPreTrainingHeads
 
 
 class BertModelIncr(BertModel):

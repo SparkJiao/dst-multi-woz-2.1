@@ -2,9 +2,8 @@ import math
 
 import torch
 from torch import nn
-from transformers.modeling_bert import BertConfig, BertSelfAttention, BertSelfOutput, \
+from transformers.modeling_bert import BertConfig, BertSelfOutput, \
     BertIntermediate, BertOutput
-from transformers.modeling_utils import prune_linear_layer
 
 
 class MultiHeadAttention(nn.Module):
