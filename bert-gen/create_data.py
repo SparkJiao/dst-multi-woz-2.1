@@ -24,7 +24,7 @@ DICT_SIZE = 400
 MAX_LENGTH = 50
 IGNORE_KEYS_IN_GOAL = ['eod', 'topic', 'messageLen', 'message']
 
-fin = open('utils/mapping.pair', 'r')
+fin = open('mapping.pair', 'r')
 replacements = []
 for line in fin.readlines():
     tok_from, tok_to = line.replace('\n', '').split('\t')
@@ -78,8 +78,9 @@ def normalize(text, clean_value=True):
                 text = text.replace(text[sidx:eidx], ''.join(m))
 
         # normalize postcode
-        ms = re.findall('([a-z]{1}[\. ]?[a-z]{1}[\. ]?\d{1,2}[, ]+\d{1}[\. ]?[a-z]{1}[\. ]?[a-z]{1}|[a-z]{2}\d{2}[a-z]{2})',
-                        text)
+        ms = re.findall(
+            '([a-z]{1}[\. ]?[a-z]{1}[\. ]?\d{1,2}[, ]+\d{1}[\. ]?[a-z]{1}[\. ]?[a-z]{1}|[a-z]{2}\d{2}[a-z]{2})',
+            text)
         if ms:
             sidx = 0
             for m in ms:
