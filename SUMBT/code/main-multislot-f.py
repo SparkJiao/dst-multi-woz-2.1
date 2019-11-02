@@ -915,6 +915,10 @@ def main():
 
     # in the case that slot and values are different between the training and evaluation
     ptr_model = torch.load(output_model_file)
+    # Initialize slot value look up to avoid mismatch
+    for k in list(ptr_model.keys()):
+        if 'slot_lookup' in k or 'value_lookup' in k:
+            ptr_model.pop(k)
 
     if n_gpu == 1:
         state = model.state_dict()
@@ -925,6 +929,7 @@ def main():
         model.module.load_state_dict(ptr_model)
 
     model.to(device)
+    model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
 
     # Evaluation
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
@@ -949,7 +954,8 @@ def main():
         nb_eval_steps, nb_eval_examples = 0, 0
 
         accuracies = {'joint7': 0, 'slot7': 0, 'joint5': 0, 'slot5': 0, 'joint_rest': 0, 'slot_rest': 0,
-                      'num_turn': 0, 'num_slot7': 0, 'num_slot5': 0, 'num_slot_rest': 0}
+                      'num_turn': 0, 'num_slot7': 0, 'num_slot5': 0, 'num_slot_rest': 0,
+                      'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0}
 
         for input_ids, input_len, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
             if input_ids.dim() == 2:
@@ -1020,14 +1026,16 @@ def main():
         out_file_name = 'eval_all_accuracies'
         with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
             f.write(
-                'joint acc (7 domain) : slot acc (7 domain) : joint acc (5 domain): slot acc (5 domain): joint restaurant : slot acc restaurant \n')
-            f.write('%.5f : %.5f : %.5f : %.5f : %.5f : %.5f \n' % (
+                'joint acc (7 domain) : slot acc (7 domain) : joint acc (5 domain): slot acc (5 domain): joint restaurant : slot acc restaurant : joint taxi : slot acc taxi \n')
+            f.write('%.5f : %.5f : %.5f : %.5f : %.5f : %.5f : %.5f : %.5f \n' % (
                 (accuracies['joint7'] / accuracies['num_turn']).item(),
                 (accuracies['slot7'] / accuracies['num_slot7']).item(),
                 (accuracies['joint5'] / accuracies['num_turn']).item(),
                 (accuracies['slot5'] / accuracies['num_slot5']).item(),
                 (accuracies['joint_rest'] / accuracies['num_turn']).item(),
-                (accuracies['slot_rest'] / accuracies['num_slot_rest']).item()
+                (accuracies['slot_rest'] / accuracies['num_slot_rest']).item(),
+                (accuracies['joint_taxi'] / accuracies['num_turn']).item(),
+                (accuracies['slot_taxi'] / accuracies['num_slot_taxi']).item()
             ))
 
 
@@ -1055,6 +1063,12 @@ def eval_all_accs(pred_slot, labels, accuracies):
     accuracies['joint_rest'] += joint_acc
     accuracies['slot_rest'] += slot_acc
     accuracies['num_slot_rest'] += num_data
+
+    # taxi domain
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 25:29], labels[:, :, 25:29])
+    accuracies['joint_taxi'] += joint_acc
+    accuracies['slot_taxi'] += slot_acc
+    accuracies['num_slot_taxi'] += num_data
 
     pred_slot5 = torch.cat((pred_slot[:, :, 0:3], pred_slot[:, :, 8:]), 2)
     label_slot5 = torch.cat((labels[:, :, 0:3], labels[:, :, 8:]), 2)
