@@ -657,10 +657,11 @@ def main():
 
     # Prepare model
     if args.nbt == 'rnn':
-        # from BeliefTrackerSlotQueryMultiSlot_F import BeliefTracker
+        logger.info("Use rnn as neural belief tracker")
         from BeliefTrackerShare import BeliefTracker
     elif args.nbt == 'transformer':
-        from BeliefTrackerSlotQueryMultiSlotTransformer import BeliefTracker
+        logger.info("Use transformer as neural belief tracker")
+        from BeliefTrackerShareTransformer import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -756,7 +757,7 @@ def main():
             nb_tr_examples = 0
             nb_tr_steps = 0
 
-            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_len, label_ids = batch
 
@@ -813,7 +814,7 @@ def main():
             dev_loss_slot, dev_acc_slot = None, None
             nb_dev_examples, nb_dev_steps = 0, 0
 
-            for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation")):
+            for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_len, label_ids = batch
                 if input_ids.dim() == 2:

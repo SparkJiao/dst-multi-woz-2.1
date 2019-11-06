@@ -259,3 +259,32 @@ class BertModel(BertPreTrainedModel):
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
         return encoded_layers, pooled_output, attn_caches
+
+
+class DialogTransformer(BertPreTrainedModel):
+    def __init__(self, config):
+        super(DialogTransformer, self).__init__(config)
+        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.encoder = BertEncoder(config)
+        self.apply(self.init_bert_weights)
+
+    def forward(self, hidden, attention_mask=None, output_all_encoded_layers=False):
+        seq_length = hidden.size(1)
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=hidden.device)
+        hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids))
+        hidden = self.dropout(hidden)
+
+        if attention_mask is None:
+            attention_mask = hidden.new_ones(hidden.size()[:-1], dtype=torch.long)
+        causal_mask = position_ids[None, None, :].repeat(hidden.size(0), seq_length, 1) <= position_ids[None, :, None]
+        extended_mask = causal_mask[:, None, :, :].long() * attention_mask[:, None, None, :]
+        extended_mask = extended_mask.to(hidden.dtype)
+        extended_mask = (1.0 - extended_mask) * -10000.0
+
+        hidden, _ = self.encoder(hidden, extended_mask, output_all_encoded_layers=output_all_encoded_layers)
+        if not output_all_encoded_layers:
+            hidden = hidden[-1]
+        return hidden
