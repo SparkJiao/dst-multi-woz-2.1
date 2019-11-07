@@ -274,7 +274,7 @@ class DialogTransformer(BertPreTrainedModel):
     def forward(self, hidden, attention_mask=None, output_all_encoded_layers=False):
         seq_length = hidden.size(1)
         position_ids = torch.arange(seq_length, dtype=torch.long, device=hidden.device)
-        hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids))
+        hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids).unsqueeze(0).expand_as(hidden))
         hidden = self.dropout(hidden)
 
         if attention_mask is None:

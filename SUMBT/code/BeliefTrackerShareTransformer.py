@@ -16,9 +16,10 @@ except ImportError:
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
-    def __init__(self, config):
+    def __init__(self, config, reduce_layers: int = 0):
         super(BertForUtteranceEncoding, self).__init__(config)
-
+        print(f'Reduce {reduce_layers} of BERT.')
+        config.num_hidden_layers = config.num_hidden_layers - reduce_layers
         self.config = config
         self.bert = BertModel(config)
 
@@ -45,7 +46,7 @@ class BeliefTracker(nn.Module):
 
         ### Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(
-            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz')
+            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers
         )
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
@@ -67,8 +68,8 @@ class BeliefTracker(nn.Module):
 
         # NBT
         nbt_config = self.sv_encoder.config
-        nbt_config.num_attention_heads = 6
-        nbt_config.num_hidden_layers = 1
+        nbt_config.num_attention_heads = self.attn_head
+        nbt_config.num_hidden_layers = self.rnn_num_layers
         nbt_config.intermediate_size = 2048
         self.transformer = DialogTransformer(nbt_config)
         self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight

@@ -101,7 +101,7 @@ class Processor(DataProcessor):
             fp_ontology.close()
 
         # MultiWOZ dataset
-        elif config.data_dir == "data/multiwoz" or config.data_dir == "data/multiwoz2.0":
+        elif config.data_dir == "data/multiwoz" or config.data_dir == "data/multiwoz2.0" or config.data_dir == 'data/multiwoz2.1':
             fp_ontology = open(os.path.join(config.data_dir, "ontology.json"), "r")
             ontology = json.load(fp_ontology)
             for slot in ontology.keys():
@@ -459,7 +459,7 @@ def main():
                         help="set initial hidden of rnns zero")
     parser.add_argument('--attn_head',
                         type=int,
-                        default=4,
+                        default=6,
                         help="the number of heads in multi-headed attention")
     parser.add_argument("--do_train",
                         action='store_true',
@@ -534,6 +534,7 @@ def main():
     parser.add_argument('--model_id', type=int, default=1)
     parser.add_argument('--use_query', default=False, action='store_true')
     parser.add_argument('--fix_bert', default=False, action='store_true')
+    parser.add_argument('--reduce_layers', default=0, type=int)
 
     args = parser.parse_args()
 
@@ -746,6 +747,7 @@ def main():
         global_step = 0
         last_update = None
         best_loss = None
+        best_acc = 0
 
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             # Train
@@ -862,7 +864,8 @@ def main():
                         summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i], global_step)
 
             dev_loss = round(dev_loss, 6)
-            if last_update is None or dev_loss < best_loss:
+            # if last_update is None or dev_loss < best_loss:
+            if last_update is None or dev_acc > best_acc:
                 # Save a trained model
                 output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
                 if args.do_train:
