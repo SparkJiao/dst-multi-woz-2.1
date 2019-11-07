@@ -691,18 +691,6 @@ def main():
     ## Initialize slot and value embeddings
     model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
 
-    # Data parallelize when use multi-gpus
-    if args.local_rank != -1:
-        try:
-            from apex.parallel import DistributedDataParallel as DDP
-        except ImportError:
-            raise ImportError(
-                "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-
-        model = DDP(model)
-    elif n_gpu > 1:
-        model = torch.nn.DataParallel(model)
-
     # Prepare optimizer
     if args.do_train:
         def get_optimizer_grouped_parameters(model):
@@ -716,10 +704,7 @@ def main():
             ]
             return optimizer_grouped_parameters
 
-        if n_gpu == 1:
-            optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
-        else:
-            optimizer_grouped_parameters = get_optimizer_grouped_parameters(model.module)
+        optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
 
         t_total = num_train_steps
 
@@ -738,6 +723,18 @@ def main():
             model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
         logger.info(optimizer)
+
+        # Data parallelize when use multi-gpus
+        if args.local_rank != -1:
+            try:
+                from apex.parallel import DistributedDataParallel as DDP
+            except ImportError:
+                raise ImportError(
+                    "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+
+            model = DDP(model)
+        elif n_gpu > 1:
+            model = torch.nn.DataParallel(model)
 
     ###############################################################################
     # Training code
