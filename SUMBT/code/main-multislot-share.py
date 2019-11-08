@@ -915,6 +915,7 @@ def main():
     if n_gpu == 1:
         state = model.state_dict()
         state.update(ptr_model)
+        state = get_pretrain(model, state)
         model.load_state_dict(state)
     else:
         print("Evaluate using only one device!")
