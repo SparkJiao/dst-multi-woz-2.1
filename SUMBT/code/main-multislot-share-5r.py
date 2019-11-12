@@ -200,6 +200,9 @@ class Processor(DataProcessor):
 
             label = [line[4 + idx] for idx in self.target_slot_idx]
 
+            # Reverse to make [CLS] system response [SEP] user utterance [SEP]
+            text_a, text_b = text_b, text_a
+
             examples.append(
                 InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
@@ -938,8 +941,6 @@ def main():
     ###############################################################################
     # Load a trained model that you have fine-tuned
     for state_name in ['pytorch_model.bin', 'pytorch_model_loss.bin']:
-        if not os.path.exists(os.path.join(args.output_dir, state_name)):
-            continue
         model = BeliefTracker(args, num_labels, device)
         logger.info(f'Loading saved model from {os.path.join(args.output_dir, state_name)}')
         output_model_file = os.path.join(args.output_dir, state_name)
