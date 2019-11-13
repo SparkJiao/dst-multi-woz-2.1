@@ -524,8 +524,15 @@ def main():
 
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
-        dev_features = convert_examples_to_features(dev_examples, tokenizer=tokenizer,
-                                                    max_seq_length=args.max_seq_length, max_sample_length=args.max_sample_length)
+        cached_dev_features_file = f"{args.dev_file}-{args.max_seq_length}-{args.max_sample_length}"
+        try:
+            with open(cached_dev_features_file, 'rb') as f:
+                dev_features = pickle.load(f)
+        except FileNotFoundError:
+            dev_features = convert_examples_to_features(dev_examples, tokenizer=tokenizer,
+                                                        max_seq_length=args.max_seq_length, max_sample_length=args.max_sample_length)
+            with open(cached_dev_features_file, 'wb') as f:
+                pickle.dump(dev_features, f)
         num_dev_steps = int(len(dev_features) / args.dev_batch_size * args.num_train_epochs)
 
         logger.info("***** Running validation *****")
