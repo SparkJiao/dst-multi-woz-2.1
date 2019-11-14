@@ -5,6 +5,7 @@ import argparse
 import random
 import collections
 from tqdm import tqdm, trange
+from typing import List, Any
 
 import numpy as np
 import torch
@@ -47,9 +48,16 @@ class InputExample(object):
 class InputFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, input_len, label_id):
+    def __init__(self, input_ids, input_len, slot_gate: List[int], label_id: List[int]):
+        """
+        :param input_ids: Bert input
+        :param input_len: Used to generate token type ids and input mask as Bert inputs
+        :param slot_gate: slot gate label, [do not care, none, ptr]
+        :param label_id: labels while slot gate is `ptr` of values in each slot
+        """
         self.input_ids = input_ids
         self.input_len = input_len
+        self.slot_gate = slot_gate
         self.label_id = label_id
 
 
@@ -110,7 +118,10 @@ class Processor(DataProcessor):
 
             ontology = json.load(fp_ontology)
             for slot in ontology.keys():
-                ontology[slot].append("none")
+                # ontology[slot].append("none")
+                ontology[slot] = [x for x in ontology[slot] if x not in ["none", "do not care"]]
+                assert "none" not in ontology[slot]
+                assert "do not care" not in ontology
                 """ FIX_UNDEFINED: Add undefined value. """
                 ontology[slot].append("undefined")
             fp_ontology.close()
@@ -224,6 +235,9 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     logger.info("max_turn_length = %d" % max_turn)
 
     undefined = 0
+    none_values = 0
+    care_values = 0
+    ptr_values = 0
 
     for (ex_index, example) in tqdm(enumerate(examples)):
         tokens_a = [x if x != '#' else '[SEP]' for x in tokenizer.tokenize(example.text_a)]
@@ -272,13 +286,28 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         input_ids += padding
         assert len(input_ids) == max_seq_length
 
+        slot_gate_map = {"none": 0, "do not care": 1, "ptr": 2}
         label_id = []
+        slot_gate = []
         label_info = 'label: '
         for i, label in enumerate(example.label):
             if label == 'dontcare':
                 label = 'do not care'
             if label == 'undefined':
                 undefined += 1
+
+            if label in ["none", "do not care"]:
+                slot_gate.append(slot_gate_map[label])
+                label_id.append(-1)
+                if slot_gate[-1] == 0:
+                    none_values += 1
+                else:
+                    care_values += 1
+                label_info += '%s (id = %d) ' % (label, -1)
+                continue
+
+            ptr_values += 1
+            slot_gate.append(slot_gate_map["ptr"])
             label_id.append(label_map[i][label])
             label_info += '%s (id = %d) ' % (label, label_map[i][label])
 
@@ -298,7 +327,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             if prev_turn_idx < max_turn_length:
                 features += [InputFeatures(input_ids=all_padding,
                                            input_len=all_padding_len,
-                                           label_id=[-1] * slot_dim)] \
+                                           label_id=[-1] * slot_dim,
+                                           slot_gate=[-1] * slot_dim)] \
                             * (max_turn_length - prev_turn_idx - 1)
             assert len(features) % max_turn_length == 0
 
@@ -306,7 +336,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             features.append(
                 InputFeatures(input_ids=input_ids,
                               input_len=input_len,
-                              label_id=label_id))
+                              label_id=label_id,
+                              slot_gate=slot_gate))
 
         prev_dialogue_idx = curr_dialogue_idx
         prev_turn_idx = curr_turn_idx
@@ -314,22 +345,29 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     if prev_turn_idx < max_turn_length:
         features += [InputFeatures(input_ids=all_padding,
                                    input_len=all_padding_len,
-                                   label_id=[-1] * slot_dim)] \
+                                   label_id=[-1] * slot_dim,
+                                   slot_gate=[-1] * slot_dim)] \
                     * (max_turn_length - prev_turn_idx - 1)
     assert len(features) % max_turn_length == 0
 
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_len = torch.tensor([f.input_len for f in features], dtype=torch.long)
+    all_slot_gates = torch.tensor([f.slot_gate for f in features], dtype=torch.long)
     all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.long)
 
     # reshape tensors to [#batch, #max_turn_length, #max_seq_length]
     all_input_ids = all_input_ids.view(-1, max_turn_length, max_seq_length)
     all_input_len = all_input_len.view(-1, max_turn_length, 2)
+    all_slot_gates = all_slot_gates.view(-1, max_turn_length, slot_dim)
     all_label_ids = all_label_ids.view(-1, max_turn_length, slot_dim)
 
     logger.info(f"There are {undefined} undefined values in total.")
+    logger.info(f"Slot gate types:")
+    logger.info(f"None: {none_values}")
+    logger.info(f"Do not care: {care_values}")
+    logger.info(f"PICK: {ptr_values}")
 
-    return all_input_ids, all_input_len, all_label_ids
+    return all_input_ids, all_input_len, all_slot_gates, all_label_ids
 
 
 def get_label_embedding(labels, max_seq_length, tokenizer, device):
@@ -636,7 +674,7 @@ def main():
         dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation, dev_file=args.dev_file)
 
         ## Training utterances
-        all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
+        all_input_ids, all_input_len, all_slot_gates, all_label_ids = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
 
         num_train_features = all_input_ids.size(0)
@@ -649,7 +687,7 @@ def main():
 
         # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
 
-        train_data = TensorDataset(all_input_ids, all_input_len, all_label_ids)
+        train_data = TensorDataset(all_input_ids, all_input_len, all_slot_gates, all_label_ids)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -658,7 +696,7 @@ def main():
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
         ## Dev utterances
-        all_input_ids_dev, all_input_len_dev, all_label_ids_dev = convert_examples_to_features(
+        all_input_ids_dev, all_input_len_dev, all_slot_gates_dev, all_label_ids_dev = convert_examples_to_features(
             dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
 
@@ -667,10 +705,7 @@ def main():
         logger.info("  Batch size = %d", args.dev_batch_size)
         logger.info("  Num steps = %d", num_dev_steps)
 
-        # all_input_ids_dev, all_input_len_dev, all_label_ids_dev = \
-        #     all_input_ids_dev.to(device), all_input_len_dev.to(device), all_label_ids_dev.to(device)
-
-        dev_data = TensorDataset(all_input_ids_dev, all_input_len_dev, all_label_ids_dev)
+        dev_data = TensorDataset(all_input_ids_dev, all_input_len_dev, all_slot_gates_dev, all_label_ids_dev)
         dev_sampler = SequentialSampler(dev_data)
         dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
 
@@ -689,7 +724,7 @@ def main():
         from BeliefTrackerShareTransformer import BeliefTracker
     elif args.nbt == 'bert':
         logger.info("Initialize transformer dialog encoder from pre-trained BERT")
-        from BeliefTrackerShareBert import BeliefTracker
+        from BeliefTrackerShareBertClassify import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -786,13 +821,13 @@ def main():
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, input_len, label_ids = batch
+                input_ids, input_len, slot_gates, label_ids = batch
 
                 # Forward
                 if n_gpu == 1:
-                    loss, loss_slot, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                    loss, loss_slot, acc, acc_slot, _ = model(input_ids, input_len, slot_gates, label_ids, n_gpu)
                 else:
-                    loss, _, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                    loss, _, acc, acc_slot, _ = model(input_ids, input_len, slot_gates, label_ids, n_gpu)
 
                     # average to multi-gpus
                     loss = loss.mean()
@@ -843,24 +878,25 @@ def main():
 
             for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, input_len, label_ids = batch
+                input_ids, input_len, slot_gates, label_ids = batch
                 if input_ids.dim() == 2:
                     input_ids = input_ids.unsqueeze(0)
                     input_len = input_len.unsqueeze(0)
+                    slot_gates = slot_gates.unsqueeze(0)
                     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                        loss, loss_slot, acc, acc_slot, _ = model(input_ids, input_len, slot_gates, label_ids, n_gpu)
                     else:
-                        loss, _, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                        loss, _, acc, acc_slot, _ = model(input_ids, input_len, slot_gates, label_ids, n_gpu)
 
                         # average to multi-gpus
                         loss = loss.mean()
                         acc = acc.mean()
                         acc_slot = acc_slot.mean(0)
 
-                num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()
+                num_valid_turn = torch.sum(slot_gates[:, :, 0].view(-1) > -1, 0).item()
                 dev_loss += loss.item() * num_valid_turn
                 dev_acc += acc.item() * num_valid_turn
 
@@ -988,14 +1024,15 @@ def main():
         if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 
             eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation, test_file=args.test_file)
-            all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
+            all_input_ids, all_input_len, all_slot_gates, all_label_ids = convert_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-            all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
+            all_input_ids, all_input_len, all_slot_gates, all_label_ids = all_input_ids.to(device), all_input_len.to(device), \
+                                                                          all_slot_gates.to(device), all_label_ids.to(device)
             logger.info("***** Running evaluation *****")
             logger.info("  Num examples = %d", len(eval_examples))
             logger.info("  Batch size = %d", args.eval_batch_size)
 
-            eval_data = TensorDataset(all_input_ids, all_input_len, all_label_ids)
+            eval_data = TensorDataset(all_input_ids, all_input_len, all_slot_gates, all_label_ids)
 
             # Run prediction for full data
             eval_sampler = SequentialSampler(eval_data)
@@ -1010,24 +1047,25 @@ def main():
                           'num_turn': 0, 'num_slot7': 0, 'num_slot5': 0, 'num_slot_rest': 0,
                           'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0}
 
-            for input_ids, input_len, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
+            for input_ids, input_len, slot_gates, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
                 if input_ids.dim() == 2:
                     input_ids = input_ids.unsqueeze(0)
                     input_len = input_len.unsqueeze(0)
+                    slot_gates = slot_gates.unsqueeze(0)
                     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, acc_slot, pred_slot = model(input_ids, input_len, label_ids, n_gpu)
+                        loss, loss_slot, acc, acc_slot, pred_slot = model(input_ids, input_len, slot_gates, label_ids, n_gpu)
                     else:
-                        loss, _, acc, acc_slot, pred_slot = model(input_ids, input_len, label_ids, n_gpu)
+                        loss, _, acc, acc_slot, pred_slot = model(input_ids, input_len, slot_gates, label_ids, n_gpu)
                         nbatch = label_ids.size(0)
                         nslot = pred_slot.size(3)
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
 
-                accuracies = eval_all_accs(pred_slot, label_ids, accuracies)
+                accuracies = eval_all_accs(pred_slot, slot_gates, label_ids, accuracies)
 
-                nb_eval_ex = (label_ids[:, :, 0].view(-1) != -1).sum().item()
+                nb_eval_ex = (slot_gates[:, :, 0].view(-1) != -1).sum().item()
                 nb_eval_examples += nb_eval_ex
                 nb_eval_steps += 1
 
@@ -1090,12 +1128,19 @@ def main():
                 ))
 
 
-def eval_all_accs(pred_slot, labels, accuracies):
-    def _eval_acc(_pred_slot, _labels):
+def eval_all_accs(pred_slot, slot_gates, labels, accuracies):
+    slot_gate_pred = pred_slot[:, :, :, 0]
+    pred_slot = pred_slot[:, :, :, 1]
+
+    def _eval_acc(_slot_gate_pred, _pred_slot, _slot_gates, _labels):
         slot_dim = _labels.size(-1)
-        accuracy = (_pred_slot == _labels).view(-1, slot_dim)
-        num_turn = torch.sum(_labels[:, :, 0].view(-1) > -1, 0).float()
-        num_data = torch.sum(_labels > -1).float()
+        classify_mask = ((_slot_gates != -1) * (_slot_gates != 2)).view(-1, slot_dim)
+        value_accuracy = (_pred_slot == _labels).view(-1, slot_dim).masked_fill(classify_mask, 1)
+        slot_gate_accuracy = (_slot_gate_pred == _slot_gates).view(-1, slot_dim)
+        accuracy = value_accuracy * slot_gate_accuracy
+        # accuracy = (_pred_slot == _labels).view(-1, slot_dim)
+        num_turn = torch.sum(_slot_gates[:, :, 0].view(-1) > -1, 0).float()
+        num_data = torch.sum(_slot_gates > -1).float()
         # joint accuracy
         joint_acc = sum(torch.sum(accuracy, 1) / slot_dim).float()
         # slot accuracy
@@ -1103,19 +1148,21 @@ def eval_all_accs(pred_slot, labels, accuracies):
         return joint_acc, slot_acc, num_turn, num_data
 
     # restaurant domain
-    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 13:20], labels[:, :, 13:20])
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(slot_gate_pred[:, :, 13:20], pred_slot[:, :, 13:20],
+                                                        slot_gates[:, :, 13:20], labels[:, :, 13:20])
     accuracies['joint_rest'] += joint_acc
     accuracies['slot_rest'] += slot_acc
     accuracies['num_slot_rest'] += num_data
 
     # taxi domain
-    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 20:24], labels[:, :, 20:24])
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(slot_gate_pred[:, :, 20:24], pred_slot[:, :, 20:24],
+                                                        slot_gates[:, :, 20:24], labels[:, :, 20:24])
     accuracies['joint_taxi'] += joint_acc
     accuracies['slot_taxi'] += slot_acc
     accuracies['num_slot_taxi'] += num_data
 
     # 5 domains (excluding bus and hotel domain)
-    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot, labels)
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(slot_gate_pred, pred_slot, slot_gates, labels)
     accuracies['joint5'] += joint_acc
     accuracies['slot5'] += slot_acc
     accuracies['num_slot5'] += num_data

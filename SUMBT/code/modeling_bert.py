@@ -288,3 +288,106 @@ class DialogTransformer(BertPreTrainedModel):
         if not output_all_encoded_layers:
             hidden = hidden[-1]
         return hidden
+
+
+class BertHalfEncoder(nn.Module):
+    def __init__(self, config):
+        super(BertHalfEncoder, self).__init__()
+        layer = BertLayer(config)
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
+
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None,
+                start_layer=None, end_layer=None):
+        all_encoder_layers = []
+        attn_caches = []
+
+        layer_start_index = start_layer if start_layer is not None else 0
+        layer_end_index = end_layer if end_layer is not None else len(self.layer)
+        layers = self.layer[layer_start_index: layer_end_index]
+
+        for layer_index, layer_module in enumerate(layers):
+            if all_attn_cache is not None:
+                attn_cache = all_attn_cache[layer_index]
+            else:
+                attn_cache = None
+            hidden_states, attn_cache = layer_module(hidden_states, attention_mask, attn_cache=attn_cache)
+            attn_caches.append(attn_cache)
+            if output_all_encoded_layers:
+                all_encoder_layers.append(hidden_states)
+        if not output_all_encoded_layers:
+            all_encoder_layers.append(hidden_states)
+        return all_encoder_layers, attn_caches
+
+
+class HalfBert(BertPreTrainedModel):
+    def __init__(self, config):
+        super(HalfBert, self).__init__(config)
+        self.embeddings = BertEmbeddings(config)
+        self.encoder = BertHalfEncoder(config)
+        self.pooler = BertPooler(config)
+        self.apply(self.init_bert_weights)
+
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, output_all_encoded_layers=True,
+                start_offset=0, all_attn_cache=None, start_layer=None, end_layer=None):
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+
+        # We create a 3D attention mask from a 2D tensor mask.
+        # Sizes are [batch_size, 1, 1, to_seq_length]
+        # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
+        # this attention mask is more simple than the triangular masking of causal attention
+        # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+
+        # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
+        # masked positions, this operation will create a tensor which is 0.0 for
+        # positions we want to attend and -10000.0 for masked positions.
+        # Since we are adding it to the raw scores before the softmax, this is
+        # effectively the same as removing these entirely.
+        extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
+        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+
+        embedding_output = self.embeddings(input_ids, token_type_ids, start_offset=start_offset)
+
+        encoded_layers, attn_caches = self.encoder(embedding_output,
+                                                   extended_attention_mask,
+                                                   output_all_encoded_layers=output_all_encoded_layers,
+                                                   all_attn_cache=all_attn_cache, start_layer=start_layer, end_layer=end_layer)
+        sequence_output = encoded_layers[-1]
+        pooled_output = self.pooler(sequence_output)
+        if not output_all_encoded_layers:
+            encoded_layers = encoded_layers[-1]
+        return encoded_layers, pooled_output, attn_caches
+
+
+class HalfDialogTransformer(BertPreTrainedModel):
+    def __init__(self, config, bert_encoder: BertHalfEncoder):
+        super(HalfDialogTransformer, self).__init__(config)
+        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        # self.encoder = BertEncoder(config)
+        self.apply(self.init_bert_weights)
+        self.encoder = bert_encoder
+
+    def forward(self, hidden, attention_mask=None, output_all_encoded_layers=False, start_layer=None, end_layer=None):
+        seq_length = hidden.size(1)
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=hidden.device)
+        hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids).unsqueeze(0).expand_as(hidden))
+        hidden = self.dropout(hidden)
+
+        if attention_mask is None:
+            attention_mask = hidden.new_ones(hidden.size()[:-1], dtype=torch.long)
+        causal_mask = position_ids[None, None, :].repeat(hidden.size(0), seq_length, 1) <= position_ids[None, :, None]
+        extended_mask = causal_mask[:, None, :, :].long() * attention_mask[:, None, None, :]
+        extended_mask = extended_mask.to(hidden.dtype)
+        extended_mask = (1.0 - extended_mask) * -10000.0
+
+        hidden, _ = self.encoder(hidden, extended_mask, output_all_encoded_layers=output_all_encoded_layers,
+                                 start_layer=start_layer, end_layer=end_layer)
+        if not output_all_encoded_layers:
+            hidden = hidden[-1]
+        return hidden
