@@ -374,7 +374,7 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
 def warmup_linear(x, warmup=0.002):
     if x < warmup:
         return x / warmup
-    return 1.0 - x
+    return max((x - 1.) / (warmup - 1.), 0.)
 
 
 def get_pretrain(model, state_dict):
@@ -559,6 +559,7 @@ def main():
     parser.add_argument('--use_query', default=False, action='store_true')
     parser.add_argument('--fix_bert', default=False, action='store_true')
     parser.add_argument('--reduce_layers', default=0, type=int)
+    parser.add_argument('--learning_rate1', default=1e-3, type=float)
 
     args = parser.parse_args()
 
@@ -721,36 +722,44 @@ def main():
 
     # Prepare optimizer
     if args.do_train:
-        def get_optimizer_grouped_parameters(model):
+        def get_optimizer_grouped_parameters(model, lr):
             param_optimizer = [(n, p) for n, p in model.named_parameters() if p.requires_grad and 'pooler' not in n]
             no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
             optimizer_grouped_parameters = [
                 {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01,
-                 'lr': args.learning_rate},
+                 'lr': lr},
                 {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
-                 'lr': args.learning_rate},
+                 'lr': lr},
             ]
             return optimizer_grouped_parameters
 
-        optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
+        # optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
+        bert_grouped_parameters = get_optimizer_grouped_parameters(model.utterance_encoder, args.learning_rate)
+        transformer_grouped_parameters = get_optimizer_grouped_parameters(model.transformer, args.learning_rate1)
 
         t_total = num_train_steps
 
         if args.local_rank != -1:
             t_total = t_total // torch.distributed.get_world_size()
 
-        optimizer = BertAdam(optimizer_grouped_parameters,
-                             lr=args.learning_rate,
-                             warmup=args.warmup_proportion,
-                             t_total=t_total)
+        optimizer1 = BertAdam(bert_grouped_parameters,
+                              lr=args.learning_rate,
+                              warmup=args.warmup_proportion,
+                              t_total=t_total)
+        optimizer2 = BertAdam(transformer_grouped_parameters,
+                              lr=args.learning_rate1,
+                              warmup=args.warmup_proportion,
+                              t_total=t_total)
+
         if args.fp16:
             try:
                 from apex import amp
             except ImportError:
                 raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-            model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+            model, [optimizer1, optimizer2] = amp.initialize(model, [optimizer1, optimizer2], opt_level=args.fp16_opt_level)
 
-        logger.info(optimizer)
+        logger.info(optimizer1)
+        logger.info(optimizer2)
 
         # Data parallelize when use multi-gpus
         if args.local_rank != -1:
@@ -785,6 +794,7 @@ def main():
             nb_tr_steps = 0
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
+            # for step, batch in enumerate(train_dataloader):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_len, label_ids = batch
 
@@ -804,9 +814,10 @@ def main():
 
                 # Backward
                 if args.fp16:
-                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    with amp.scale_loss(loss, [optimizer1, optimizer2]) as scaled_loss:
                         scaled_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
+                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer1), 1.0)
+                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer2), 1.0)
                 else:
                     loss.backward()
 
@@ -815,25 +826,39 @@ def main():
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     # modify lealrning rate with special warm up BERT uses
-                    # lr_this_step = args.learning_rate * warmup_linear(global_step / t_total, args.warmup_proportion)
-                    lr_this_step = optimizer.get_lr()[0]
+                    # if args.fp16:
+                    #     lr_this_step1 = args.learning_rate * warmup_linear(global_step / t_total, args.warmup_proportion)
+                    #     lr_this_step2 = args.learning_rate1 * warmup_linear(global_step / t_total, args.warmup_proportion)
+                    #     for param_group in optimizer1.param_groups:
+                    #         param_group['lr'] = lr_this_step1
+                    #     for param_group in optimizer2.param_groups:
+                    #         param_group['lr'] = lr_this_step2
+                    # else:
+                    lr_this_step1 = optimizer1.get_lr()[0]
+                    lr_this_step2 = optimizer2.get_lr()[0]
+
                     if summary_writer is not None:
                         summary_writer.add_scalar("Epoch", epoch, global_step)
                         summary_writer.add_scalar("Train/Loss", loss, global_step)
                         summary_writer.add_scalar("Train/JointAcc", acc, global_step)
-                        summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
+                        summary_writer.add_scalar("Train/LearningRate", lr_this_step1, global_step)
+                        summary_writer.add_scalar("Train/LearningRate2", lr_this_step2, global_step)
+                        # summary_writer.add_scalar("Train/TestLR", test_lr, global_step)
                         if n_gpu == 1:
                             for i, slot in enumerate(processor.target_slot):
                                 summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
                                                           global_step)
                                 summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
                                                           global_step)
-                    # for param_group in optimizer.param_groups:
-                    #     param_group['lr'] = lr_this_step
 
-                    optimizer.step()
-                    optimizer.zero_grad()
+                    optimizer1.step()
+                    optimizer2.step()
+                    optimizer1.zero_grad()
+                    optimizer2.zero_grad()
                     global_step += 1
+                    # print(global_step)
+                    # print(lr_this_step2)
+                    # print(optimizer2.get_lr()[0])
 
             # Perform evaluation on validation dataset
             model.eval()
@@ -861,26 +886,20 @@ def main():
                         acc = acc.mean()
                         acc_slot = acc_slot.mean(0)
 
-                # num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()
-                # dev_loss += loss.item() * num_valid_turn
-                # dev_acc += acc.item() * num_valid_turn
-                dev_loss += loss.item()
-                dev_acc += acc.item()
+                num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()
+                dev_loss += loss.item() * num_valid_turn
+                dev_acc += acc.item() * num_valid_turn
 
                 if n_gpu == 1:
                     if dev_loss_slot is None:
-                        # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
-                        # dev_acc_slot = acc_slot * num_valid_turn
-                        dev_loss_slot = [l for l in loss_slot]
-                        dev_acc_slot = acc_slot
+                        dev_loss_slot = [l * num_valid_turn for l in loss_slot]
+                        dev_acc_slot = acc_slot * num_valid_turn
                     else:
                         for i, l in enumerate(loss_slot):
-                            # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
-                            dev_loss_slot[i] = dev_loss_slot[i] + l
-                        # dev_acc_slot += acc_slot * num_valid_turn
-                        dev_acc_slot += acc_slot
+                            dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
+                        dev_acc_slot += acc_slot * num_valid_turn
 
-                nb_dev_examples += 1
+                nb_dev_examples += num_valid_turn
 
             dev_loss = dev_loss / nb_dev_examples
             dev_acc = dev_acc / nb_dev_examples
@@ -1072,7 +1091,7 @@ def main():
                           'loss': loss
                           }
 
-            out_file_name = f'eval_results_{state_name}'
+            out_file_name = 'eval_results'
             if args.target_slot == 'all':
                 out_file_name += '_all'
             output_eval_file = os.path.join(args.output_dir, "%s.txt" % out_file_name)
