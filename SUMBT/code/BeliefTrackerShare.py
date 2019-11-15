@@ -113,7 +113,7 @@ class BeliefTracker(nn.Module):
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         ### Classifier
-        self.nll = CrossEntropyLoss(ignore_index=-1)
+        self.nll = CrossEntropyLoss(ignore_index=-1, reduce='sum')
 
         ### Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
@@ -267,7 +267,7 @@ class BeliefTracker(nn.Module):
                 undefined_value_mask = (labels[:, :, s] == num_slot_labels)
                 masked_slot_labels_for_loss = labels[:, :, s].masked_fill(undefined_value_mask, -1)
 
-                _loss = self.nll(_dist.view(ds * ts, -1), masked_slot_labels_for_loss.view(-1))
+                _loss = self.nll(_dist.view(ds * ts, -1), masked_slot_labels_for_loss.view(-1)) / (ds * 1.0)
                 loss_slot.append(_loss.item())
                 loss += _loss
 
