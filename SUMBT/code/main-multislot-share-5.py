@@ -845,6 +845,7 @@ def main():
             for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_len, label_ids = batch
+                batch_size = input_ids.size(0)
                 if input_ids.dim() == 2:
                     input_ids = input_ids.unsqueeze(0)
                     input_len = input_len.unsqueeze(0)
@@ -861,28 +862,32 @@ def main():
                         acc = acc.mean()
                         acc_slot = acc_slot.mean(0)
 
-                # num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()
+                # FIXME：
+                #  Joint accuracy is calculated as the average correct turns over all turns. So we should first calculate the correct
+                #  sum and then calculate average instead of calculate the average accuracy for all batches.
+                num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()  # valid turns for all current batch
                 # dev_loss += loss.item() * num_valid_turn
-                # dev_acc += acc.item() * num_valid_turn
-                dev_loss += loss.item()
-                dev_acc += acc.item()
+                dev_acc += acc.item() * num_valid_turn
+                dev_loss += loss.item() * batch_size
+                # dev_acc += acc.item()
 
                 if n_gpu == 1:
                     if dev_loss_slot is None:
                         # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
-                        # dev_acc_slot = acc_slot * num_valid_turn
-                        dev_loss_slot = [l for l in loss_slot]
-                        dev_acc_slot = acc_slot
+                        dev_acc_slot = acc_slot * num_valid_turn
+                        dev_loss_slot = [l * batch_size for l in loss_slot]
+                        # dev_acc_slot = acc_slot
                     else:
                         for i, l in enumerate(loss_slot):
                             # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
-                            dev_loss_slot[i] = dev_loss_slot[i] + l
-                        # dev_acc_slot += acc_slot * num_valid_turn
-                        dev_acc_slot += acc_slot
+                            dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
+                        dev_acc_slot += acc_slot * num_valid_turn
+                        # dev_acc_slot += acc_slot
 
-                nb_dev_examples += 1
+                nb_dev_examples += num_valid_turn
 
-            dev_loss = dev_loss / nb_dev_examples
+            # dev_loss = dev_loss / nb_dev_examples
+            dev_loss = dev_loss / len(dev_dataloader)
             dev_acc = dev_acc / nb_dev_examples
 
             if n_gpu == 1:
@@ -894,7 +899,7 @@ def main():
                 summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
                 if n_gpu == 1:
                     for i, slot in enumerate(processor.target_slot):
-                        summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'), dev_loss_slot[i] / nb_dev_examples,
+                        summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'), dev_loss_slot[i] / len(dev_dataloader),
                                                   global_step)
                         summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i], global_step)
 

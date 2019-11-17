@@ -1,6 +1,7 @@
 #!/bin/bash
 
-output_dir=exp-multiwoz/exp-data2.0-share-tf1.2.1
+#output_dir=exp-multiwoz/exp-data2.0-share-tf1.2.1
+output_dir=exp-multiwoz/exp-data2.0-share-tf1.2.2  # Fix dev accuracy calculation error
 target_slot='all'
 bert_dir='/home/jiaofangkai/'
 
