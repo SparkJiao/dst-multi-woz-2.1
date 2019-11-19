@@ -15,3 +15,4 @@ python code/main-multislot-share.py --do_train --do_eval --num_train_epochs 30 -
 --fp16 --fp16_opt_level O2 --gradient_accumulation_steps 8 \
 --reduce_layers 2 --num_rnn_layers 4 --max_label_length 17 --max_slot_length 6
 
+# 52.90% joint accuracy

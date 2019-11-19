@@ -130,7 +130,7 @@ class BeliefTracker(nn.Module):
         attention_mask = ids > 0
         return token_type_ids, attention_mask
 
-    def forward(self, input_ids, input_len, labels, n_gpu=1, target_slot=None):
+    def forward(self, input_ids, token_type_ids, attention_mask, labels, n_gpu=1, target_slot=None):
 
         # if target_slot is not specified, output values corresponding all slot-types
         if target_slot is None:
@@ -142,7 +142,7 @@ class BeliefTracker(nn.Module):
         slot_dim = len(target_slot)
 
         # Utterance encoding
-        token_type_ids, attention_mask = self._make_aux_tensors(input_ids, input_len)
+        # token_type_ids, attention_mask = self._make_aux_tensors(input_ids, input_len)
 
         _, _, all_attn_cache = self.utterance_encoder(input_ids.view(-1, self.max_seq_length),
                                                       token_type_ids.view(-1, self.max_seq_length),
