@@ -372,6 +372,20 @@ def get_pretrain(model, state_dict):
     return own_state
 
 
+def make_aux_tensors(ids, len):
+    token_type_ids = torch.zeros(ids.size(), dtype=torch.long)
+    for i in range(len.size(0)):
+        for j in range(len.size(1)):
+            if len[i, j, 0] == 0:  # padding
+                break
+            elif len[i, j, 1] > 0:  # escape only text_a case
+                start = len[i, j, 0]
+                ending = len[i, j, 0] + len[i, j, 1]
+                token_type_ids[i, j, start:ending] = 1
+    attention_mask = ids > 0
+    return token_type_ids, attention_mask
+
+
 def main():
     """
     This script fix the undefined values in ontology. Please search "FIX_UNDEFINED" to find the difference with `main-multislot.py`
@@ -614,6 +628,7 @@ def main():
         ## Training utterances
         all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
+        all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
 
         num_train_features = all_input_ids.size(0)
         num_train_steps = int(num_train_features / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
@@ -625,7 +640,7 @@ def main():
 
         # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
 
-        train_data = TensorDataset(all_input_ids, all_input_len, all_label_ids)
+        train_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_label_ids)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -636,6 +651,7 @@ def main():
         ## Dev utterances
         all_input_ids_dev, all_input_len_dev, all_label_ids_dev = convert_examples_to_features(
             dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
+        all_token_type_ids_dev, all_input_mask_dev = make_aux_tensors(all_input_ids_dev, all_input_len_dev)
         num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
 
         logger.info("***** Running validation *****")
@@ -646,7 +662,7 @@ def main():
         # all_input_ids_dev, all_input_len_dev, all_label_ids_dev = \
         #     all_input_ids_dev.to(device), all_input_len_dev.to(device), all_label_ids_dev.to(device)
 
-        dev_data = TensorDataset(all_input_ids_dev, all_input_len_dev, all_label_ids_dev)
+        dev_data = TensorDataset(all_input_ids_dev, all_token_type_ids_dev, all_input_mask_dev, all_label_ids_dev)
         dev_sampler = SequentialSampler(dev_data)
         dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
 
@@ -759,13 +775,13 @@ def main():
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, input_len, label_ids = batch
+                input_ids, token_type_ids, input_mask, label_ids = batch
 
                 # Forward
                 if n_gpu == 1:
-                    loss, loss_slot, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                    loss, loss_slot, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
                 else:
-                    loss, _, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                    loss, _, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
 
                     # average to multi-gpus
                     loss = loss.mean()
@@ -817,18 +833,19 @@ def main():
 
             for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, input_len, label_ids = batch
+                input_ids, token_type_ids, input_mask, label_ids = batch
                 batch_size = input_ids.size(0)
                 if input_ids.dim() == 2:
                     input_ids = input_ids.unsqueeze(0)
-                    input_len = input_len.unsqueeze(0)
+                    token_type_ids = token_type_ids.unsqueeze(0)
+                    input_mask = input_mask.unsqueeze(0)
                     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                        loss, loss_slot, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
                     else:
-                        loss, _, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                        loss, _, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
 
                         # average to multi-gpus
                         loss = loss.mean()
@@ -975,12 +992,14 @@ def main():
             eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation)
             all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-            all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
+            all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
+            # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device),
+            # all_label_ids.to(device)
             logger.info("***** Running evaluation *****")
             logger.info("  Num examples = %d", len(eval_examples))
             logger.info("  Batch size = %d", args.eval_batch_size)
 
-            eval_data = TensorDataset(all_input_ids, all_input_len, all_label_ids)
+            eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_label_ids)
 
             # Run prediction for full data
             eval_sampler = SequentialSampler(eval_data)
@@ -995,17 +1014,22 @@ def main():
                           'num_turn': 0, 'num_slot7': 0, 'num_slot5': 0, 'num_slot_rest': 0,
                           'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0}
 
-            for input_ids, input_len, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
+            for input_ids, token_type_ids, input_mask, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
+                input_ids = input_ids.to(device)
+                token_type_ids = token_type_ids.to(device)
+                input_mask = input_mask.to(device)
+                label_ids = label_ids.to(device)
                 if input_ids.dim() == 2:
                     input_ids = input_ids.unsqueeze(0)
-                    input_len = input_len.unsqueeze(0)
+                    token_type_ids = token_type_ids.unsqueeze(0)
+                    input_mask = input_mask.unsqueeze(0)
                     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, acc_slot, pred_slot = model(input_ids, input_len, label_ids, n_gpu)
+                        loss, loss_slot, acc, acc_slot, pred_slot = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
                     else:
-                        loss, _, acc, acc_slot, pred_slot = model(input_ids, input_len, label_ids, n_gpu)
+                        loss, _, acc, acc_slot, pred_slot = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
                         nbatch = label_ids.size(0)
                         nslot = pred_slot.size(3)
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
