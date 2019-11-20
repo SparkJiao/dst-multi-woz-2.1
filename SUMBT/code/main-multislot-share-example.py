@@ -341,10 +341,14 @@ def select_value_examples(labels, example_num, slots, data_len, max_seq_length, 
     type_ids = [[0] * len(tokens) for tokens in slot_tokens]
     all_example_ids = torch.zeros((data_len, len(slots), max_seq_length), dtype=torch.long)
     all_example_type_ids = torch.zeros((data_len, len(slots), max_seq_length), dtype=torch.long)
+    truncate = 0
     for i in range(data_len):
         for s, (slot, slot_values) in enumerate(zip(slot_tokens, clean_values)):
             if not fix:
-                example_values = random.sample(slot_values, example_num)
+                if example_num > len(slot_values):
+                    example_values = slot_values
+                else:
+                    example_values = random.sample(slot_values, example_num)
             else:
                 example_values = slot_values[:example_num]
             example_tokens = slot[:]
@@ -353,6 +357,7 @@ def select_value_examples(labels, example_num, slots, data_len, max_seq_length, 
             for example in example_values:
                 tokens = tokenizer.tokenize(example) + ["[SEP]"]
                 if len(example_tokens) + len(tokens) > max_seq_length:
+                    truncate += 1
                     break
                 example_tokens += tokens
                 example_type_ids += [type_id] * len(tokens)
@@ -364,6 +369,7 @@ def select_value_examples(labels, example_num, slots, data_len, max_seq_length, 
                 example_type_ids.append(0)
             all_example_ids[i, s] = torch.LongTensor(example_ids)
             all_example_type_ids[i, s] = torch.LongTensor(example_type_ids)
+    logger.info(f"There are {truncate} truncates during select examples.")
     return all_example_ids, all_example_type_ids
 
 
@@ -582,6 +588,7 @@ def main():
     parser.add_argument('--use_query', default=False, action='store_true')
     parser.add_argument('--fix_bert', default=False, action='store_true')
     parser.add_argument('--reduce_layers', default=0, type=int)
+    parser.add_argument('--example_num', default=3, type=int)
 
     args = parser.parse_args()
 
