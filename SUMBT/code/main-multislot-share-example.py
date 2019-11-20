@@ -339,8 +339,8 @@ def select_value_examples(labels, example_num, slots, data_len, max_seq_length, 
     slot_tokens = [["[CLS]"] + tokenizer.tokenize(slot) + ["[SEP]"] for slot in slots]
     clean_values = [[label for label in slot_labels if label not in ["none", "undefined"]] for slot_labels in labels]
     type_ids = [[0] * len(tokens) for tokens in slot_tokens]
-    all_example_ids = torch.zeros((len(slots), data_len, max_seq_length), dtype=torch.long)
-    all_example_type_ids = torch.zeros((len(slots), data_len, max_seq_length), dtype=torch.long)
+    all_example_ids = torch.zeros((data_len, len(slots), max_seq_length), dtype=torch.long)
+    all_example_type_ids = torch.zeros((data_len, len(slots), max_seq_length), dtype=torch.long)
     for i in range(data_len):
         for s, (slot, slot_values) in enumerate(zip(slot_tokens, clean_values)):
             if not fix:
@@ -355,15 +355,15 @@ def select_value_examples(labels, example_num, slots, data_len, max_seq_length, 
                 if len(example_tokens) + len(tokens) > max_seq_length:
                     break
                 example_tokens += tokens
-                example_type_ids += [type_id] * len(example_tokens)
+                example_type_ids += [type_id] * len(tokens)
                 type_id ^= 1
             assert len(example_tokens) == len(example_type_ids)
             example_ids = tokenizer.convert_tokens_to_ids(example_tokens)
             while len(example_ids) < max_seq_length:
                 example_ids.append(0)
                 example_type_ids.append(0)
-            all_example_ids[s, i] = torch.LongTensor(example_ids)
-            all_example_type_ids[s, i] = torch.LongTensor(example_type_ids)
+            all_example_ids[i, s] = torch.LongTensor(example_ids)
+            all_example_type_ids[i, s] = torch.LongTensor(example_type_ids)
     return all_example_ids, all_example_type_ids
 
 
@@ -662,6 +662,10 @@ def main():
         all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
+        # Get example values for each slot
+        all_example_ids, all_example_type_ids = select_value_examples(label_list, args.example_num, processor.target_slot,
+                                                                      all_input_ids.size(0), args.max_slot_length,
+                                                                      tokenizer=tokenizer, fix=False)
 
         num_train_features = all_input_ids.size(0)
         num_train_steps = int(num_train_features / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
@@ -673,7 +677,7 @@ def main():
 
         # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
 
-        train_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_label_ids)
+        train_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_label_ids, all_example_ids, all_example_type_ids)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -686,6 +690,9 @@ def main():
             dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids_dev, all_input_mask_dev = make_aux_tensors(all_input_ids_dev, all_input_len_dev)
         num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
+        all_example_ids_dev, all_example_type_ids_dev = select_value_examples(label_list, args.example_num, processor.target_slot,
+                                                                              all_input_ids_dev.size(0), args.max_slot_length,
+                                                                              tokenizer=tokenizer, fix=True)
 
         logger.info("***** Running validation *****")
         logger.info("  Num examples = %d", len(dev_examples))
@@ -695,7 +702,8 @@ def main():
         # all_input_ids_dev, all_input_len_dev, all_label_ids_dev = \
         #     all_input_ids_dev.to(device), all_input_len_dev.to(device), all_label_ids_dev.to(device)
 
-        dev_data = TensorDataset(all_input_ids_dev, all_token_type_ids_dev, all_input_mask_dev, all_label_ids_dev)
+        dev_data = TensorDataset(all_input_ids_dev, all_token_type_ids_dev, all_input_mask_dev, all_label_ids_dev,
+                                 all_example_ids_dev, all_example_type_ids_dev)
         dev_sampler = SequentialSampler(dev_data)
         dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
 
@@ -711,7 +719,7 @@ def main():
         from BeliefTrackerShare import BeliefTracker
     elif args.nbt == 'transformer':
         logger.info("Use transformer as neural belief tracker")
-        from BeliefTrackerShareTransformer import BeliefTracker
+        from BeliefTrackerShareTransformerExample import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -808,13 +816,13 @@ def main():
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, token_type_ids, input_mask, label_ids = batch
+                # input_ids, token_type_ids, input_mask, label_ids, example_ids, example_type_ids = batch
 
                 # Forward
                 if n_gpu == 1:
-                    loss, loss_slot, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
+                    loss, loss_slot, acc, acc_slot, _ = model(*batch, n_gpu=n_gpu)
                 else:
-                    loss, _, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
+                    loss, _, acc, acc_slot, _ = model(*batch, n_gpu=n_gpu)
 
                     # average to multi-gpus
                     loss = loss.mean()
@@ -833,7 +841,7 @@ def main():
                     loss.backward()
 
                 tr_loss += loss.item()
-                nb_tr_examples += input_ids.size(0)
+                nb_tr_examples += batch[0].size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     # modify lealrning rate with special warm up BERT uses
@@ -866,19 +874,25 @@ def main():
 
             for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, token_type_ids, input_mask, label_ids = batch
-                batch_size = input_ids.size(0)
-                if input_ids.dim() == 2:
-                    input_ids = input_ids.unsqueeze(0)
-                    token_type_ids = token_type_ids.unsqueeze(0)
-                    input_mask = input_mask.unsqueeze(0)
-                    label_ids = label_ids.unsuqeeze(0)
+                # input_ids, token_type_ids, input_mask, label_ids, example_ids, example_type_ids = batch
+                # batch_size = input_ids.size(0)
+                batch_size = batch[0].size(0)
+                # if input_ids.dim() == 2:
+                #     input_ids = input_ids.unsqueeze(0)
+                #     token_type_ids = token_type_ids.unsqueeze(0)
+                #     input_mask = input_mask.unsqueeze(0)
+                #     label_ids = label_ids.unsuqeeze(0)
+                #     example_ids = example_ids.unsqueeze(0)
+                #     example_type_ids = example_type_ids.unsqueeze(0)
+                if batch[0].dim() == 2:
+                    batch = tuple(t.unsqueeze(0) for t in batch)
+                label_ids = batch[3]
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
+                        loss, loss_slot, acc, acc_slot, _ = model(*batch, n_gpu=n_gpu)
                     else:
-                        loss, _, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
+                        loss, _, acc, acc_slot, _ = model(*batch, n_gpu=n_gpu)
 
                         # average to multi-gpus
                         loss = loss.mean()
@@ -1028,11 +1042,15 @@ def main():
             all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
             # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device),
             # all_label_ids.to(device)
+            all_example_ids, all_example_type_ids = select_value_examples(label_list, args.example_num, processor.target_slot,
+                                                                  all_input_ids.size(0), args.max_slot_length,
+                                                                  tokenizer=tokenizer, fix=True)
             logger.info("***** Running evaluation *****")
             logger.info("  Num examples = %d", len(eval_examples))
             logger.info("  Batch size = %d", args.eval_batch_size)
 
-            eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_label_ids)
+            eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_label_ids,
+                                      all_example_ids, all_example_type_ids)
 
             # Run prediction for full data
             eval_sampler = SequentialSampler(eval_data)
@@ -1047,22 +1065,28 @@ def main():
                           'num_turn': 0, 'num_slot7': 0, 'num_slot5': 0, 'num_slot_rest': 0,
                           'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0}
 
-            for input_ids, token_type_ids, input_mask, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
-                input_ids = input_ids.to(device)
-                token_type_ids = token_type_ids.to(device)
-                input_mask = input_mask.to(device)
-                label_ids = label_ids.to(device)
-                if input_ids.dim() == 2:
-                    input_ids = input_ids.unsqueeze(0)
-                    token_type_ids = token_type_ids.unsqueeze(0)
-                    input_mask = input_mask.unsqueeze(0)
-                    label_ids = label_ids.unsuqeeze(0)
+            # for input_ids, token_type_ids, input_mask, label_ids, example_ids, example_type_ids in \
+            #         tqdm(eval_dataloader, desc="Evaluating"):
+            for batch in tqdm(eval_dataloader, desc="Evaluating", dynamic_ncols=True):
+                # input_ids = input_ids.to(device)
+                # token_type_ids = token_type_ids.to(device)
+                # input_mask = input_mask.to(device)
+                # label_ids = label_ids.to(device)
+                # if input_ids.dim() == 2:
+                #     input_ids = input_ids.unsqueeze(0)
+                #     token_type_ids = token_type_ids.unsqueeze(0)
+                #     input_mask = input_mask.unsqueeze(0)
+                #     label_ids = label_ids.unsuqeeze(0)
+                batch = tuple(t.to(device) for t in batch)
+                if batch[0].dim() == 2:
+                    batch = tuple(t.unsqueeze(0) for t in batch)
+                label_ids = batch[3]
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, acc_slot, pred_slot = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
+                        loss, loss_slot, acc, acc_slot, pred_slot = model(*batch, n_gpu=n_gpu)
                     else:
-                        loss, _, acc, acc_slot, pred_slot = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
+                        loss, _, acc, acc_slot, pred_slot = model(*batch, n_gpu=n_gpu)
                         nbatch = label_ids.size(0)
                         nslot = pred_slot.size(3)
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
