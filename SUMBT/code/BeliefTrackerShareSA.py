@@ -9,10 +9,10 @@ from torch.nn import CrossEntropyLoss
 
 try:
     from . import layers
-    from .modeling_bert import BertModel, SimpleDialogSelfAttention
+    from .modeling_bert import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
 except ImportError:
     import layers
-    from modeling_bert import BertModel, SimpleDialogSelfAttention
+    from modeling_bert import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
@@ -71,6 +71,13 @@ class BeliefTracker(nn.Module):
         nbt_config.num_attention_heads = self.attn_head
         print(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True, add_layer_norm=args.sa_add_layer_norm)
+
+        self.do_cross_slot_attention = args.across_slot
+        if args.across_slot:
+            print("Add cross slot attention")
+            self.slot_attention = SimpleSelfAttention(nbt_config, add_output=True, add_layer_norm=args.sa_add_layer_norm)
+        else:
+            self.slot_attention = None
 
         ### Measure
         self.distance_metric = args.distance_metric
@@ -165,6 +172,10 @@ class BeliefTracker(nn.Module):
 
         # NBT
         hidden = self.transformer(hidden, None).view(slot_dim, ds, ts, -1)
+
+        if self.do_cross_slot_attention:
+            hidden = hidden.view(slot_dim, bs, -1).transpose(0, 1)
+            hidden = self.slot_attention(hidden, None).transpose(0, 1).reshape(slot_dim, ds, ts, -1)
 
         # Label (slot-value) encoding
         loss = 0

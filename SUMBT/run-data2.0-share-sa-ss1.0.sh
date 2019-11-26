@@ -1,10 +1,6 @@
 #!/bin/bash
 
-#output_dir=exp-multiwoz/data2.0-share-sa1.0
-#output_dir=exp-multiwoz/data2.0-share-sa1.1 # epoch 20 -> 6 gradient accumulation steps 8 -> 1
-#output_dir=exp-multiwoz/data2.0-share-sa1.1-g8 # gradient accumulation steps 1 -> 8
-#output_dir=exp-multiwoz/data2.0-share-sa1.2  # gradient accumulation steps 8 -> 1 .epoch 6 -> 10
-output_dir=exp-multiwoz/data2.0-share-sa1.3 # epoch 10 -> 6  --sa_add_layer_norm
+output_dir=exp-multiwoz/data2.0-share-sa-ss1.0
 target_slot='all'
 nbt='sa'
 bert_dir='/home/jiaofangkai/'
@@ -16,4 +12,4 @@ python code/main-multislot-share.py --do_train --do_eval --num_train_epochs 6 --
 --tf_dir tensorboard --max_seq_length 96 --max_turn_length 22 \
 --fp16 --fp16_opt_level O2 --gradient_accumulation_steps 1 \
 --reduce_layers 0 --max_label_length 17 --max_slot_length 6 \
---sa_add_layer_norm
+--sa_add_layer_norm --across_slot

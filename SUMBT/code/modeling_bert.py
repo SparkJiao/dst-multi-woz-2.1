@@ -431,3 +431,34 @@ class SimpleDialogSelfAttention(BertPreTrainedModel):
             hidden = self.sa_output(hidden)
 
         return hidden
+
+
+class SimpleSelfAttention(BertPreTrainedModel):
+    def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False):
+        super(SimpleSelfAttention, self).__init__(config)
+
+        self.sa = BertSelfAttention(config)
+        self.add_output = add_output
+        if add_output:
+            output_module_list = [nn.Linear(config.hidden_size, config.hidden_size),
+                                  nn.Dropout(config.hidden_dropout_prob)]
+            if add_layer_norm:
+                output_module_list.append(nn.LayerNorm(config.hidden_size, eps=1e-12))
+            self.sa_output = nn.Sequential(*output_module_list)
+        else:
+            self.sa_output = None
+        self.apply(self.init_bert_weights)
+
+    def forward(self, hidden, attention_mask=None):
+
+        if attention_mask is None:
+            attention_mask = hidden.new_ones(hidden.size()[:-1], dtype=torch.long)
+        extended_mask = attention_mask[:, None, None, :]
+        extended_mask = extended_mask.to(hidden.dtype)
+        extended_mask = (1.0 - extended_mask) * -10000.0
+
+        hidden, _ = self.sa(hidden, extended_mask)
+        if self.add_output:
+            hidden = self.sa_output(hidden)
+
+        return hidden

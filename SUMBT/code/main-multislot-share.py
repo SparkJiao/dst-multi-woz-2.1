@@ -550,6 +550,7 @@ def main():
     parser.add_argument('--fix_bert', default=False, action='store_true')
     parser.add_argument('--reduce_layers', default=0, type=int)
     parser.add_argument('--sa_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--across_slot', default=False, action='store_true')
 
     args = parser.parse_args()
 
