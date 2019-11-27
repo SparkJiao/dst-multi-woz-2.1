@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 from torch.nn import CrossEntropyLoss
+from torch.utils.checkpoint import checkpoint
 
 try:
     from . import layers
@@ -230,6 +231,106 @@ class BeliefTracker(nn.Module):
             return loss, loss_slot, acc, acc_slot, pred_slot
         else:
             return loss.unsqueeze(0), None, acc.unsqueeze(0), acc_slot.unsqueeze(0), pred_slot.unsqueeze(0)
+
+    def forward_first(self, input_ids, token_type_ids, attention_mask):
+        # if target_slot is None:
+        #     target_slot = list(range(0, self.num_slots))
+
+        ds = input_ids.size(0)  # dialog size
+        ts = input_ids.size(1)  # turn size
+        # bs = ds * ts
+        # slot_dim = len(target_slot)
+
+        _, _, all_attn_cache = self.utterance_encoder(input_ids.view(-1, self.max_seq_length),
+                                                      token_type_ids.view(-1, self.max_seq_length),
+                                                      attention_mask.view(-1, self.max_seq_length),
+                                                      output_all_encoded_layers=False)
+
+        return all_attn_cache, ds, ts
+
+    def forward_second(self, all_attn_cache, attention_mask, ds, ts, labels, n_gpu=1, target_slot=None):
+        bs = ds * ts
+        slot_dim = len(target_slot)
+
+        # Domain-slot encoding
+        slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+        slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+        slot_mask = torch.cat(
+            [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
+             slot_mask], dim=-1)
+        assert slot_ids.size(0) == slot_dim * bs
+        for attn_cache in all_attn_cache:
+            for k in attn_cache:
+                attn_cache[k] = attn_cache[k].unsqueeze(0).expand(slot_dim, -1, -1, -1) \
+                    .reshape(slot_dim * bs, self.max_seq_length, -1)
+        hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=None, attention_mask=slot_mask,
+                                              output_all_encoded_layers=False, start_offset=self.max_seq_length,
+                                              all_attn_cache=all_attn_cache)
+        hidden = hidden[:, 0].view(slot_dim, ds, ts, -1)
+
+        if self.do_cross_slot_attention:
+            hidden = hidden.view(slot_dim, bs, -1).transpose(0, 1)
+            hidden = self.slot_attention(hidden, None).transpose(0, 1).reshape(slot_dim, ds, ts, -1)
+        hidden = hidden.view(slot_dim * ds, ts, self.bert_output_dim)
+
+        # NBT
+        hidden = self.transformer(hidden, None).view(slot_dim, ds, ts, -1)
+
+        # Label (slot-value) encoding
+        loss = 0
+        loss_slot = []
+        pred_slot = []
+        output = []
+        for s, slot_id in enumerate(target_slot):  ## note: target_slots are successive
+            # loss calculation
+            hid_label = self.value_lookup[slot_id].weight
+            num_slot_labels = hid_label.size(0)
+
+            if self.distance_metric == 'product':
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
+                _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
+                _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
+            else:
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels,
+                                                                                           -1)
+                _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
+                    ds * ts * num_slot_labels, -1)
+                _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
+
+            if self.distance_metric == "euclidean":
+                _dist = -_dist
+            _, pred = torch.max(_dist, -1)
+            pred_slot.append(pred.view(ds, ts, 1))
+            output.append(_dist)
+
+            if labels is not None:
+                """ FIX_UNDEFINED: Mask all undefined values """
+                undefined_value_mask = (labels[:, :, s] == num_slot_labels)
+                masked_slot_labels_for_loss = labels[:, :, s].masked_fill(undefined_value_mask, -1)
+
+                _loss = self.nll(_dist.view(ds * ts, -1), masked_slot_labels_for_loss.view(-1)) / (ds * 1.0)
+                loss_slot.append(_loss.item())
+                loss += _loss
+
+        if labels is None:
+            return output
+
+        # calculate joint accuracy
+        pred_slot = torch.cat(pred_slot, 2)
+        accuracy = (pred_slot == labels).view(-1, slot_dim)
+        acc_slot = torch.sum(accuracy, 0).float() \
+                   / torch.sum(labels.view(-1, slot_dim) > -1, 0).float()
+        acc = sum(torch.sum(accuracy, 1) / slot_dim).float() \
+              / torch.sum(labels[:, :, 0].view(-1) > -1, 0).float()  # joint accuracy
+
+        if n_gpu == 1:
+            return loss, loss_slot, acc, acc_slot, pred_slot
+        else:
+            return loss.unsqueeze(0), None, acc.unsqueeze(0), acc_slot.unsqueeze(0), pred_slot.unsqueeze(0)
+
+    def forward_checkpoint(self, input_ids, token_type_ids, attention_mask, labels, n_gpu=1, target_slot=None):
+        all_attn_cache, ds, ts = checkpoint(self.forward_first, input_ids, token_type_ids, attention_mask)
+        return checkpoint(self.forward_second, all_attn_cache, attention_mask, ds, ts, labels, n_gpu, target_slot)
 
     @staticmethod
     def init_parameter(module):

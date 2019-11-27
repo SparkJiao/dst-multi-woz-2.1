@@ -550,6 +550,7 @@ def main():
     parser.add_argument('--fix_bert', default=False, action='store_true')
     parser.add_argument('--reduce_layers', default=0, type=int)
     parser.add_argument('--sa_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--across_slot', default=False, action='store_true')
 
     args = parser.parse_args()
@@ -648,7 +649,8 @@ def main():
         else:
             train_sampler = DistributedSampler(train_data)
 
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
+        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size,
+                                      pin_memory=True, num_workers=4)
 
         ## Dev utterances
         all_input_ids_dev, all_input_len_dev, all_label_ids_dev = convert_examples_to_features(
@@ -684,6 +686,9 @@ def main():
     elif args.nbt == 'sa':
         logger.info("Use simple self-attention as neural belief tracker")
         from BeliefTrackerShareSA import BeliefTracker
+    elif args.nbt == 'test':
+        logger.info("Test belief tracker")
+        from BeliefTrackerShareSA_for_test import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -779,7 +784,7 @@ def main():
             nb_tr_steps = 0
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
-                batch = tuple(t.to(device) for t in batch)
+                batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
                 input_ids, token_type_ids, input_mask, label_ids = batch
 
                 # Forward

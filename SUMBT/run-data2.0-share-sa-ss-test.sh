@@ -1,8 +1,8 @@
 #!/bin/bash
 
-output_dir=exp-multiwoz/data2.0-share-sa-ss1.0
+output_dir=exp-multiwoz/data2.0-share-sa-ss-test
 target_slot='all'
-nbt='sa'
+nbt='test'
 bert_dir='/home/jiaofangkai/'
 
 python code/main-multislot-share.py --do_train --do_eval --num_train_epochs 6 --data_dir data/multiwoz2.0 \
