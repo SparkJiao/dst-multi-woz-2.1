@@ -395,13 +395,18 @@ class HalfDialogTransformer(BertPreTrainedModel):
 
 
 class SimpleDialogSelfAttention(BertPreTrainedModel):
-    def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False):
+    def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False,
+                 self_attention: BertSelfAttention = None):
         super(SimpleDialogSelfAttention, self).__init__(config)
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.sa = BertSelfAttention(config)
+        if self_attention is not None:
+            self.sa = copy.deepcopy(self_attention)
+        else:
+            self.sa = BertSelfAttention(config)
+        # self.sa = BertSelfAttention(config)
         self.add_output = add_output
         if add_output:
             output_module_list = [nn.Linear(config.hidden_size, config.hidden_size),

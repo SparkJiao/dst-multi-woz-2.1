@@ -573,6 +573,10 @@ def main():
     parser.add_argument('--use_query', default=False, action='store_true')
     parser.add_argument('--fix_bert', default=False, action='store_true')
     parser.add_argument('--reduce_layers', default=0, type=int)
+    parser.add_argument('--sa_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--across_slot', default=False, action='store_true')
+    parser.add_argument('--override_attn', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -703,6 +707,9 @@ def main():
     elif args.nbt == 'transformer':
         logger.info("Use transformer as neural belief tracker")
         from BeliefTrackerShareTransformer import BeliefTracker
+    elif args.nbt == 'sa':
+        logger.info("Use simple self-attention as neural belief tracker")
+        from BeliefTrackerShareSA import BeliefTracker
     elif args.nbt == 'bert':
         logger.info("Initialize transformer dialog encoder from pre-trained BERT")
         from BeliefTrackerShareBert import BeliefTracker

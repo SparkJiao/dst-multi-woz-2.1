@@ -70,13 +70,22 @@ class BeliefTracker(nn.Module):
         nbt_config = self.sv_encoder.config
         nbt_config.num_attention_heads = self.attn_head
         print(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
-        self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True, add_layer_norm=args.sa_add_layer_norm)
+        last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
+        if args.override_attn:
+            print("Override self attention from last layer of BERT")
+            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                         add_layer_norm=args.sa_add_layer_norm,
+                                                         self_attention=last_attention)
+        else:
+            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                         add_layer_norm=args.sa_add_layer_norm)
 
         self.do_cross_slot_attention = args.across_slot
         if args.across_slot:
             print("Add cross slot attention")
             print(f"Cross slot attention add layer norm: {args.ss_add_layer_norm}")
-            self.slot_attention = SimpleSelfAttention(nbt_config, add_output=True, add_layer_norm=args.ss_add_layer_norm)
+            self.slot_attention = SimpleSelfAttention(nbt_config, add_output=True,
+                                                      add_layer_norm=args.ss_add_layer_norm)
         else:
             self.slot_attention = None
 
