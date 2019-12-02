@@ -553,6 +553,7 @@ def main():
     parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--across_slot', default=False, action='store_true')
     parser.add_argument('--override_attn', default=False, action='store_true')
+    parser.add_argument('--transpose_layer', default=-1, type=int)
 
     args = parser.parse_args()
 
@@ -690,6 +691,9 @@ def main():
     elif args.nbt == 'test':
         logger.info("Test belief tracker")
         from BeliefTrackerShareSA_for_test import BeliefTracker
+    elif args.nbt == 'transpose':
+        logger.info("Use self-attention neural belief tracker but bert layer is transposed.")
+        from BeliefTrackerShareSA_transpose import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

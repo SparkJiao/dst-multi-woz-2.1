@@ -127,6 +127,73 @@ class BertSelfAttention(nn.Module):
         return context_layer, new_attn_cache
 
 
+# class BertSlotSelfAttention(nn.Module):
+#     def __init__(self, config):
+#         super(BertSlotSelfAttention, self).__init__()
+#         if config.hidden_size % config.num_attention_heads != 0:
+#             raise ValueError(
+#                 "The hidden size (%d) is not a multiple of the number of attention "
+#                 "heads (%d)" % (config.hidden_size, config.num_attention_heads))
+#         self.num_attention_heads = config.num_attention_heads
+#         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+#         self.all_head_size = self.num_attention_heads * self.attention_head_size
+#
+#         self.query = nn.Linear(config.hidden_size, self.all_head_size)
+#         self.key = nn.Linear(config.hidden_size, self.all_head_size)
+#         self.value = nn.Linear(config.hidden_size, self.all_head_size)
+#
+#         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+#
+#         self.config = config
+#
+#     def transpose_for_scores(self, x):
+#         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+#         x = x.view(*new_x_shape)
+#         return x.permute(0, 2, 1, 3)
+#
+#     def forward(self, hidden_states, attention_mask, attn_cache=None):
+#         bs, slot_len, h = hidden_states.size()
+#         slot_dim = self.config.slot_dim
+#         hidden_states = hidden_states.reshape(slot_dim, -1, slot_len, h).transpose(0, 1).reshape(-1, slot_len * slot_dim, h)
+#         # (slot_dim * bs * slot_len
+#
+#         mixed_query_layer = self.query(hidden_states)
+#         mixed_key_layer = self.key(hidden_states)
+#         mixed_value_layer = self.value(hidden_states)
+#
+#         new_attn_cache = {
+#             "key": mixed_key_layer,
+#             "value": mixed_value_layer
+#         }
+#
+#         if attn_cache is not None:
+#             mixed_key_layer = torch.cat([attn_cache["key"], mixed_key_layer], dim=1)
+#             mixed_value_layer = torch.cat([attn_cache["value"], mixed_value_layer], dim=1)
+#
+#         query_layer = self.transpose_for_scores(mixed_query_layer)
+#         key_layer = self.transpose_for_scores(mixed_key_layer)
+#         value_layer = self.transpose_for_scores(mixed_value_layer)
+#
+#         # Take the dot product between "query" and "key" to get the raw attention scores.
+#         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+#         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+#         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+#         attention_scores = attention_scores + attention_mask
+#
+#         # Normalize the attention scores to probabilities.
+#         attention_probs = nn.Softmax(dim=-1)(attention_scores)
+#
+#         # This is actually dropping out entire tokens to attend to, which might
+#         # seem a bit unusual, but is taken from the original Transformer paper.
+#         attention_probs = self.dropout(attention_probs)
+#
+#         context_layer = torch.matmul(attention_probs, value_layer)
+#         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+#         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+#         context_layer = context_layer.view(*new_context_layer_shape)
+#         return context_layer, new_attn_cache
+
+
 class BertAttention(nn.Module):
     def __init__(self, config):
         super(BertAttention, self).__init__()
@@ -355,7 +422,8 @@ class HalfBert(BertPreTrainedModel):
         encoded_layers, attn_caches = self.encoder(embedding_output,
                                                    extended_attention_mask,
                                                    output_all_encoded_layers=output_all_encoded_layers,
-                                                   all_attn_cache=all_attn_cache, start_layer=start_layer, end_layer=end_layer)
+                                                   all_attn_cache=all_attn_cache, start_layer=start_layer,
+                                                   end_layer=end_layer)
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
         if not output_all_encoded_layers:
@@ -470,6 +538,35 @@ class SimpleSelfAttention(BertPreTrainedModel):
 
 
 
+class TransposeBertEncoder(nn.Module):
+    def __init__(self, config):
+        super(TransposeBertEncoder, self).__init__()
+        layer = BertLayer(config)
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
+        self.transpose_layer = config.transpose_layer
+        self.dialog_reshape: DialogReshape = config.dialog_reshape
+
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None):
+        all_encoder_layers = []
+        attn_caches = []
+        if self.transpose_layer >= 0:
+            hidden_states, attention_mask = self.dialog_reshape.flatten_slot(hidden_states, attention_mask)
+        for layer_index, layer_module in enumerate(self.layer):
+            if all_attn_cache is not None and layer_index >= self.transpose_layer:
+                attn_cache = all_attn_cache[layer_index]
+            else:
+                attn_cache = None
+            if layer_index == self.transpose_layer:
+                hidden_states, attention_mask = self.dialog_reshape.back_and_expand(hidden_states)
+            hidden_states, attn_cache = layer_module(hidden_states, attention_mask, attn_cache=attn_cache)
+            attn_caches.append(attn_cache)
+            if output_all_encoded_layers:
+                all_encoder_layers.append(hidden_states)
+        if not output_all_encoded_layers:
+            all_encoder_layers.append(hidden_states)
+        return all_encoder_layers, attn_caches
+
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, config):
         super(MultiHeadAttention, self).__init__()
@@ -521,50 +618,91 @@ class MultiHeadAttention(nn.Module):
         return context_layer, (mixed_query_layer, mixed_key_layer, mixed_value_layer)
 
 
-class SlotAttention(BertPreTrainedModel):
-    def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False):
-        super(SlotAttention, self).__init__(config)
-        self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-        # Attention between slot tokens and utterance tokens
-        self.context_query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.context_key = nn.Linear(config.hidden_size, self.all_head_size)
-        self.context_value = nn.Linear(config.hidden_size, self.all_head_size)
-        # Attention between slot tokens(Only query and key)
-        self.slot_query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.slot_key = nn.Linear(config.hidden_size, self.all_head_size)
+# class SlotAttention(BertPreTrainedModel):
+#     def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False):
+#         super(SlotAttention, self).__init__(config)
+#         self.num_attention_heads = config.num_attention_heads
+#         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+#         self.all_head_size = self.num_attention_heads * self.attention_head_size
+#         # Attention between slot tokens and utterance tokens
+#         self.context_query = nn.Linear(config.hidden_size, self.all_head_size)
+#         self.context_key = nn.Linear(config.hidden_size, self.all_head_size)
+#         self.context_value = nn.Linear(config.hidden_size, self.all_head_size)
+#         # Attention between slot tokens(Only query and key)
+#         self.slot_query = nn.Linear(config.hidden_size, self.all_head_size)
+#         self.slot_key = nn.Linear(config.hidden_size, self.all_head_size)
+#
+#         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+#
+#         self.apply(self.init_bert_weights)
+#
+#     def transpose_for_scores(self, x):
+#         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+#         x = x.view(*new_x_shape)
+#         return x.permute(0, 2, 1, 3)
+#
+#     def forward(self, slot_hidden, context_hidden, slot_attention_mask=None, context_attention_mask=None):
+#         slot_dim, bs, slot_len, _ = slot_hidden.size()
+#
+#         context_query = self.transpose_for_scores(self.context_query(slot_hidden))
+#         context_key = self.transpose_for_scores(self.context_key(context_hidden))
+#         context_value = self.transpose_for_scores(self.context_value(context_hidden))
+#
+#         context_attention_scores = torch.matmul(context_query, context_key.transpose(-1, -2))
+#         context_attention_scores = context_attention_scores / math.sqrt(self.attention_head_size)
+#         context_attention_scores = context_attention_scores + context_attention_mask
+#
+#         # Normalize the attention scores to probabilities.
+#         context_attention_probs = nn.Softmax(dim=-1)(context_attention_scores)
+#
+#         # This is actually dropping out entire tokens to attend to, which might
+#         # seem a bit unusual, but is taken from the original Transformer paper.
+#         context_attention_probs = self.dropout(context_attention_probs)
+#
+#         slot_context = torch.matmul(context_attention_probs, context_value)
+#         slot_context = slot_context.permute(0, 2, 1, 3).contiguous()
+#         new_context_layer_shape = slot_context.size()[:-2] + (self.all_head_size,)
+#         slot_context = slot_context.view(*new_context_layer_shape)
+#
+#         return hidden
 
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-        self.apply(self.init_bert_weights)
 
-    def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
+# ====================
+# Function
+# ====================
 
-    def forward(self, slot_hidden, context_hidden, slot_attention_mask=None, context_attention_mask=None):
-        slot_dim, bs, slot_len, _ = slot_hidden.size()
+class DialogReshape:
+    def __init__(self):
+        self.slot_dim = 0
+        self.dialog_size = 0
+        self.turn_size = 0
+        self.slot_len = 0
+        self.old_slot_mask = None
+        self.concat_mask = None
 
-        context_query = self.transpose_for_scores(self.context_query(slot_hidden))
-        context_key = self.transpose_for_scores(self.context_key(context_hidden))
-        context_value = self.transpose_for_scores(self.context_value(context_hidden))
+    def set_size(self, slot_dim, dialog_size, turn_size, slot_len, concat_mask):
+        self.slot_dim = slot_dim
+        self.dialog_size = dialog_size
+        self.turn_size = turn_size
+        self.slot_len = slot_len
+        self.concat_mask = concat_mask
 
-        context_attention_scores = torch.matmul(context_query, context_key.transpose(-1, -2))
-        context_attention_scores = context_attention_scores / math.sqrt(self.attention_head_size)
-        context_attention_scores = context_attention_scores + context_attention_mask
+    def flatten_slot(self, slot, slot_mask):
+        """
+         slot: (slot_dim, max_slot_len, h) -> (1, slot_dim * max_slot_len, h)
+         slot_mask: (slot_dim, 1, x, max_slot_len) -> (1, 1, x, slot_dim * max_slot_len)
+         `x` may be the size of pre-defined seq length
+        """
+        slot = slot.reshape(-1, slot.size(-1)).unsqueeze(0)
+        a = slot_mask.size(1)
+        b = slot_mask.size(2)
+        self.old_slot_mask = slot_mask
+        new_slot_mask = slot_mask.permute(1, 2, 0, 3).reshape(a, b, self.slot_dim * self.slot_len).unsqueeze(0)
+        return slot, new_slot_mask
 
-        # Normalize the attention scores to probabilities.
-        context_attention_probs = nn.Softmax(dim=-1)(context_attention_scores)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        context_attention_probs = self.dropout(context_attention_probs)
-
-        slot_context = torch.matmul(context_attention_probs, context_value)
-        slot_context = slot_context.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = slot_context.size()[:-2] + (self.all_head_size,)
-        slot_context = slot_context.view(*new_context_layer_shape)
-
-        return hidden
+    def back_and_expand(self, slot):
+        h = slot.size(-1)
+        bs = self.dialog_size * self.turn_size
+        slot = slot.reshape(self.slot_dim, self.slot_len, h).unsqueeze(1).expand(-1, bs, -1, -1).reshape(-1, self.slot_len, h)
+        return slot, self.concat_mask[:, None, None, :].to(dtype=slot.dtype)
