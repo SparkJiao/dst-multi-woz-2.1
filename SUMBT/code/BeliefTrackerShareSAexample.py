@@ -112,10 +112,10 @@ class BeliefTracker(nn.Module):
         self.sv_encoder.eval()
 
         # register slot input buffer
-        slot_mask = slot_ids > 0
+        # slot_mask = slot_ids > 0
 
-        self.register_buffer("slot_ids", slot_ids)
-        self.register_buffer("slot_mask", slot_mask)
+        # self.register_buffer("slot_ids", slot_ids)
+        # self.register_buffer("slot_mask", slot_mask)
 
         with torch.no_grad():
             for s, label_id in enumerate(label_ids):
@@ -148,7 +148,8 @@ class BeliefTracker(nn.Module):
         attention_mask = ids > 0
         return token_type_ids, attention_mask
 
-    def forward(self, input_ids, token_type_ids, attention_mask, labels, n_gpu=1, target_slot=None):
+    def forward(self, input_ids, token_type_ids, attention_mask, labels, example_ids, example_type_ids,
+                n_gpu=1, target_slot=None):
 
         # if target_slot is not specified, output values corresponding all slot-types
         if target_slot is None:
@@ -168,17 +169,20 @@ class BeliefTracker(nn.Module):
                                                       output_all_encoded_layers=False)
 
         # Domain-slot encoding
-        slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
-        slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+        # slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+        # slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+        # [batch, slot_dim, max_slot_length]
+        slot_ids = example_ids.transpose(0, 1).unsqueeze(2).expand(-1, -1, ts, -1).reshape(-1, self.max_slot_length)
+        slot_type_ids = example_type_ids.transpose(0, 1).unsqueeze(2).expand(-1, -1, ts, -1).reshape(-1, self.max_slot_length)
         slot_mask = torch.cat(
             [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
-             slot_mask], dim=-1)
+             (slot_ids > 0)], dim=-1)
         assert slot_ids.size(0) == slot_dim * bs
         for attn_cache in all_attn_cache:
             for k in attn_cache:
                 attn_cache[k] = attn_cache[k].unsqueeze(0).expand(slot_dim, -1, -1, -1) \
                     .reshape(slot_dim * bs, self.max_seq_length, -1)
-        hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=None, attention_mask=slot_mask,
+        hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=slot_type_ids, attention_mask=slot_mask,
                                               output_all_encoded_layers=False, start_offset=self.max_seq_length,
                                               all_attn_cache=all_attn_cache)
         hidden = hidden[:, 0].view(slot_dim, ds, ts, -1)

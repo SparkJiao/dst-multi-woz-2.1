@@ -54,7 +54,7 @@ class BeliefTracker(nn.Module):
         ### Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(
             os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers,
-            dialog_reshape = self.dialog_reshape, transpose_layer=self.transpose_layer
+            dialog_reshape=self.dialog_reshape, transpose_layer=self.transpose_layer
         )
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
@@ -87,6 +87,9 @@ class BeliefTracker(nn.Module):
         else:
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm)
+        if args.share_position_weight:
+            print("Dialog self attention will share position embeddings with BERT")
+            self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         self.do_cross_slot_attention = args.across_slot
         if args.across_slot:

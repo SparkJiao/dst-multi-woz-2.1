@@ -537,7 +537,6 @@ class SimpleSelfAttention(BertPreTrainedModel):
         return hidden
 
 
-
 class TransposeBertEncoder(nn.Module):
     def __init__(self, config):
         super(TransposeBertEncoder, self).__init__()
@@ -665,7 +664,6 @@ class MultiHeadAttention(nn.Module):
 #         slot_context = slot_context.view(*new_context_layer_shape)
 #
 #         return hidden
-
 
 
 # ====================

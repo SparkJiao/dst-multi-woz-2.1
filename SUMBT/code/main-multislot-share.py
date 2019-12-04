@@ -554,6 +554,7 @@ def main():
     parser.add_argument('--across_slot', default=False, action='store_true')
     parser.add_argument('--override_attn', default=False, action='store_true')
     parser.add_argument('--transpose_layer', default=-1, type=int)
+    parser.add_argument('--share_position_weight', default=False, action='store_true')
 
     args = parser.parse_args()
 

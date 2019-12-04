@@ -589,6 +589,12 @@ def main():
     parser.add_argument('--fix_bert', default=False, action='store_true')
     parser.add_argument('--reduce_layers', default=0, type=int)
     parser.add_argument('--example_num', default=3, type=int)
+    parser.add_argument('--sa_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--across_slot', default=False, action='store_true')
+    parser.add_argument('--override_attn', default=False, action='store_true')
+    parser.add_argument('--transpose_layer', default=-1, type=int)
+    parser.add_argument('--share_position_weight', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -727,6 +733,9 @@ def main():
     elif args.nbt == 'transformer':
         logger.info("Use transformer as neural belief tracker")
         from BeliefTrackerShareTransformerExample import BeliefTracker
+    elif args.nbt == 'sa':
+        logger.info("Use simple dialog self-attention as neural belief tracker")
+        from BeliefTrackerShareSAexample import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
