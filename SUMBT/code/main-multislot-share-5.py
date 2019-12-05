@@ -577,6 +577,7 @@ def main():
     parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--across_slot', default=False, action='store_true')
     parser.add_argument('--override_attn', default=False, action='store_true')
+    parser.add_argument('--share_position_weight', default=False, action='store_true')
 
     args = parser.parse_args()
 

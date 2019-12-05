@@ -6,7 +6,7 @@
 #output_dir=exp-multiwoz/data2.0-share-sa1.2  # gradient accumulation steps 8 -> 1 .epoch 6 -> 10
 #output_dir=exp-multiwoz/data2.0-share-sa1.3 # epoch 10 -> 6  --sa_add_layer_norm
 #output_dir=exp-multiwoz/data2.0-share-sa1.4  # --override_attn
-output_dir=exp-multiwoz/data2.0-share-sa1.6  # --share_position_weight
+output_dir=exp-multiwoz/data2.0-share-sa1.6-restaurant  # --share_position_weight
 target_slot='restaurant'
 nbt='sa'
 bert_dir='/home/jiaofangkai/'

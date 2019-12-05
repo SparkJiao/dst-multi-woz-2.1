@@ -127,73 +127,6 @@ class BertSelfAttention(nn.Module):
         return context_layer, new_attn_cache
 
 
-# class BertSlotSelfAttention(nn.Module):
-#     def __init__(self, config):
-#         super(BertSlotSelfAttention, self).__init__()
-#         if config.hidden_size % config.num_attention_heads != 0:
-#             raise ValueError(
-#                 "The hidden size (%d) is not a multiple of the number of attention "
-#                 "heads (%d)" % (config.hidden_size, config.num_attention_heads))
-#         self.num_attention_heads = config.num_attention_heads
-#         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-#         self.all_head_size = self.num_attention_heads * self.attention_head_size
-#
-#         self.query = nn.Linear(config.hidden_size, self.all_head_size)
-#         self.key = nn.Linear(config.hidden_size, self.all_head_size)
-#         self.value = nn.Linear(config.hidden_size, self.all_head_size)
-#
-#         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
-#
-#         self.config = config
-#
-#     def transpose_for_scores(self, x):
-#         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-#         x = x.view(*new_x_shape)
-#         return x.permute(0, 2, 1, 3)
-#
-#     def forward(self, hidden_states, attention_mask, attn_cache=None):
-#         bs, slot_len, h = hidden_states.size()
-#         slot_dim = self.config.slot_dim
-#         hidden_states = hidden_states.reshape(slot_dim, -1, slot_len, h).transpose(0, 1).reshape(-1, slot_len * slot_dim, h)
-#         # (slot_dim * bs * slot_len
-#
-#         mixed_query_layer = self.query(hidden_states)
-#         mixed_key_layer = self.key(hidden_states)
-#         mixed_value_layer = self.value(hidden_states)
-#
-#         new_attn_cache = {
-#             "key": mixed_key_layer,
-#             "value": mixed_value_layer
-#         }
-#
-#         if attn_cache is not None:
-#             mixed_key_layer = torch.cat([attn_cache["key"], mixed_key_layer], dim=1)
-#             mixed_value_layer = torch.cat([attn_cache["value"], mixed_value_layer], dim=1)
-#
-#         query_layer = self.transpose_for_scores(mixed_query_layer)
-#         key_layer = self.transpose_for_scores(mixed_key_layer)
-#         value_layer = self.transpose_for_scores(mixed_value_layer)
-#
-#         # Take the dot product between "query" and "key" to get the raw attention scores.
-#         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-#         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-#         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-#         attention_scores = attention_scores + attention_mask
-#
-#         # Normalize the attention scores to probabilities.
-#         attention_probs = nn.Softmax(dim=-1)(attention_scores)
-#
-#         # This is actually dropping out entire tokens to attend to, which might
-#         # seem a bit unusual, but is taken from the original Transformer paper.
-#         attention_probs = self.dropout(attention_probs)
-#
-#         context_layer = torch.matmul(attention_probs, value_layer)
-#         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-#         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-#         context_layer = context_layer.view(*new_context_layer_shape)
-#         return context_layer, new_attn_cache
-
-
 class BertAttention(nn.Module):
     def __init__(self, config):
         super(BertAttention, self).__init__()
@@ -210,11 +143,51 @@ class BertLayer(nn.Module):
     def __init__(self, config):
         super(BertLayer, self).__init__()
         self.attention = BertAttention(config)
+        if not hasattr(config, "slot_attention_type"):
+            self.slot_attention_type = -1
+        else:
+            self.slot_attention_type = config.slot_attention_type
+        if self.slot_attention_type != -1:
+            self.slot_attention = BertAttention(config)
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
+        self.config = config
 
-    def forward(self, hidden_states, attention_mask, attn_cache=None):
+    def _extract_slot_cls(self, x):
+        slot_dim = self.config.slot_dim
+        cls = x[:, 0].view(slot_dim, -1, self.config.hidden_size).transpose(0, 1)
+        cls_mask = cls.new_zeros(cls.size()[:-1])
+        cls_mask = cls_mask[:, None, None, :]
+        return cls, cls_mask
+
+    def _inject_slot_cls(self, x, cls):
+        b, slot_dim = cls.size()[:-1]
+        cls = cls.transpose(0, 1).reshape(slot_dim * b, self.config.hidden_size)
+        x[:, 0] = cls
+        return x.contiguous()
+
+    def slot_seq_attention(self, hidden_states):
+        cls, cls_mask = self._extract_slot_cls(hidden_states)
+        cls, _ = self.slot_attention(cls, cls_mask)
+        hidden_states = self._inject_slot_cls(hidden_states, cls)
+        return hidden_states
+
+    def copy_weight(self):
+        self.slot_attention = copy.deepcopy(self.attention)
+
+    def share_weight(self):
+        self.slot_attention.self.query.weight = self.attention.self.query.weight
+        self.slot_attention.self.key.weight = self.attention.self.key.weight
+        self.slot_attention.self.value.weight = self.attention.self.value.weight
+        self.slot_attention.output.dense.weight = self.attention.output.dense.weight
+
+    def full_share(self):
+        self.slot_attention = self.attention
+
+    def forward(self, hidden_states, attention_mask, attn_cache=None, do_slot_attention: bool = False):
         attention_output, attn_cache = self.attention(hidden_states, attention_mask, attn_cache=attn_cache)
+        if self.slot_attention_type != -1 and do_slot_attention:
+            attention_output = self.slot_seq_attention(attention_output)
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output, attn_cache
@@ -226,7 +199,7 @@ class BertEncoder(nn.Module):
         layer = BertLayer(config)
         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None):
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None, **kwargs):
         all_encoder_layers = []
         attn_caches = []
         for layer_index, layer_module in enumerate(self.layer):
@@ -234,7 +207,7 @@ class BertEncoder(nn.Module):
                 attn_cache = all_attn_cache[layer_index]
             else:
                 attn_cache = None
-            hidden_states, attn_cache = layer_module(hidden_states, attention_mask, attn_cache=attn_cache)
+            hidden_states, attn_cache = layer_module(hidden_states, attention_mask, attn_cache=attn_cache, **kwargs)
             attn_caches.append(attn_cache)
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
@@ -296,7 +269,7 @@ class BertModel(BertPreTrainedModel):
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, output_all_encoded_layers=True,
-                start_offset=0, all_attn_cache=None):
+                start_offset=0, all_attn_cache=None, **kwargs):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
         if token_type_ids is None:
@@ -321,7 +294,8 @@ class BertModel(BertPreTrainedModel):
         encoded_layers, attn_caches = self.encoder(embedding_output,
                                                    extended_attention_mask,
                                                    output_all_encoded_layers=output_all_encoded_layers,
-                                                   all_attn_cache=all_attn_cache)
+                                                   all_attn_cache=all_attn_cache,
+                                                   **kwargs)
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
         if not output_all_encoded_layers:

@@ -16,18 +16,20 @@ except ImportError:
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
-    def __init__(self, config, reduce_layers: int = 0):
+    def __init__(self, config, slot_dim=35, reduce_layers: int = 0, slot_attention_type: int = -1):
         super(BertForUtteranceEncoding, self).__init__(config)
         print(f'Reduce {reduce_layers} of BERT.')
         config.num_hidden_layers = config.num_hidden_layers - reduce_layers
-        config.slot_attention_type = -1
+        # config.__dict__["slot_attention_type"] = slot_attention_type
+        config.slot_attention_type = slot_attention_type
+        config.slot_dim = slot_dim
         self.config = config
         self.bert = BertModel(config)
 
     def forward(self, input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False,
-                start_offset=0, all_attn_cache=None):
+                start_offset=0, all_attn_cache=None, **kwargs):
         return self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers,
-                         start_offset=start_offset, all_attn_cache=all_attn_cache)
+                         start_offset=start_offset, all_attn_cache=all_attn_cache, **kwargs)
 
 
 class BeliefTracker(nn.Module):
@@ -45,10 +47,16 @@ class BeliefTracker(nn.Module):
         self.attn_head = args.attn_head
         self.device = device
 
-        ### Utterance Encoder
+        # Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(
-            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers
+            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'),
+            reduce_layers=args.reduce_layers,
+            slot_attention_type=args.slot_attention_type,
+            slot_dim=self.num_slots
         )
+        if args.slot_attention_type != -1:
+            for bert_layer in self.utterance_encoder.bert.encoder.layer:
+                bert_layer.full_share()
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
         if args.fix_utterance_encoder:
@@ -59,7 +67,7 @@ class BeliefTracker(nn.Module):
             for p in self.utterance_encoder.bert.parameters():
                 p.requires_grad = False
 
-        ### values Encoder (not trainable)
+        # values Encoder (not trainable)
         self.sv_encoder = BertForUtteranceEncoding.from_pretrained(
             os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'))
         for p in self.sv_encoder.bert.parameters():
@@ -181,7 +189,7 @@ class BeliefTracker(nn.Module):
                     .reshape(slot_dim * bs, self.max_seq_length, -1)
         hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=None, attention_mask=slot_mask,
                                               output_all_encoded_layers=False, start_offset=self.max_seq_length,
-                                              all_attn_cache=all_attn_cache)
+                                              all_attn_cache=all_attn_cache, do_slot_attention=True)
         hidden = hidden[:, 0].view(slot_dim, ds, ts, -1)
 
         if self.do_cross_slot_attention:
