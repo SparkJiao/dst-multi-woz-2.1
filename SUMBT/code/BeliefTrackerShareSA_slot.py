@@ -56,7 +56,7 @@ class BeliefTracker(nn.Module):
         )
         if args.slot_attention_type != -1:
             for bert_layer in self.utterance_encoder.bert.encoder.layer:
-                bert_layer.full_share()
+                bert_layer.copy_weight()
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
         if args.fix_utterance_encoder:
