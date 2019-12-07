@@ -22,11 +22,10 @@ import logging
 import math
 
 import torch
+from pytorch_pretrained_bert.modeling import BertConfig
 from pytorch_pretrained_bert.modeling import BertLayerNorm, BertPooler, \
     BertPreTrainedModel, BertIntermediate, BertOutput, BertSelfOutput
-from pytorch_pretrained_bert.modeling import BertConfig
 from torch import nn
-
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +45,7 @@ class BertEmbeddings(nn.Module):
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, input_ids, token_type_ids=None, start_offset=0, turns=0):
+    def forward(self, input_ids, token_type_ids=None, start_offset=0):
         """
         start_offset: offset for position ids
         """
@@ -61,15 +60,6 @@ class BertEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = words_embeddings + position_embeddings + token_type_embeddings
-
-        if turns > 0:
-            assert input_ids.size(0) % turns == 0
-            batch = input_ids.size(0) // turns
-            dialog_position_ids = torch.arange(turns, dtype=torch.long, device=input_ids.device)
-            dialog_position_ids = dialog_position_ids.unsqueeze(0).expand(batch, turns).reshape(input_ids.size(0))
-            dialog_position_ids = dialog_position_ids.unsqueeze(1).expand_as(input_ids)
-            embeddings = embeddings + self.position_embeddings(dialog_position_ids)
-
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
@@ -151,55 +141,65 @@ class BertLayer(nn.Module):
     def __init__(self, config):
         super(BertLayer, self).__init__()
         self.attention = BertAttention(config)
-        self.dialog_attention = BertAttention(config)
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
-        self.config = config
-        self._get_casual_mask()
 
-    def _get_casual_mask(self):
-        max_turns = self.config.max_turns
-        logger.info(max_turns)
-        dialog_position_ids = torch.arange(max_turns, dtype=torch.long)
-        logger.info(dialog_position_ids.size())
-        casual_mask = dialog_position_ids[None, :].repeat(max_turns, 1) >= dialog_position_ids[:, None]
-        casual_mask = (casual_mask.float() * -10000.0).unsqueeze(0)
-        self.register_buffer("casual_mask", casual_mask)
+    # def copy_weight(self):
+    #     self.slot_attention = copy.deepcopy(self.attention)
+    #
+    # def share_weight(self):
+    #     self.slot_attention.self.query.weight = self.attention.self.query.weight
+    #     self.slot_attention.self.key.weight = self.attention.self.key.weight
+    #     self.slot_attention.self.value.weight = self.attention.self.value.weight
+    #     self.slot_attention.output.dense.weight = self.attention.output.dense.weight
+    #
+    # def full_share(self):
+    #     self.slot_attention = self.attention
 
-    def _extract_dialog_cls(self, x, turns):
-        bs = x.size(0) // turns
-        hidden_size = x.size(-1)
-        cls = x[:, 0].view(bs, turns, hidden_size)
-        cls_mask = self.casual_mask[:, :turns, :turns].unsqueeze(1).repeat(bs, 1, 1, 1)
-        return cls, cls_mask
+    def forward(self, hidden_states, attention_mask, attn_cache=None):
+        attention_output, attn_cache = self.attention(hidden_states, attention_mask, attn_cache=attn_cache)
+        intermediate_output = self.intermediate(attention_output)
+        layer_output = self.output(intermediate_output, attention_output)
+        return layer_output, attn_cache
 
-    @staticmethod
-    def _inject_dialog_cls(x, cls):
-        x[:, 0] = cls.reshape(-1, cls.size(-1))
-        return x.contiguous()
 
-    def _dialog_self_attention(self, hidden_states, turns):
-        cls, cls_mask = self._extract_dialog_cls(hidden_states, turns)
-        cls, _ = self.dialog_attention(cls, cls_mask)
-        hidden_states = self._inject_dialog_cls(hidden_states, cls)
-        return hidden_states
+class BertSlotLayer(nn.Module):
+    def __init__(self, config):
+        super(BertSlotLayer, self).__init__()
+        self.attention = BertAttention(config)
+        self.slot_attention = BertAttention(config)
+        self.intermediate = BertIntermediate(config)
+        self.output = BertOutput(config)
 
     def copy_weight(self):
-        self.dialog_attention = copy.deepcopy(self.attention)
+        self.slot_attention = copy.deepcopy(self.attention)
 
     def share_weight(self):
-        self.dialog_attention.self.query.weight = self.attention.self.query.weight
-        self.dialog_attention.self.key.weight = self.attention.self.key.weight
-        self.dialog_attention.self.value.weight = self.attention.self.value.weight
-        self.dialog_attention.output.dense.weight = self.attention.output.dense.weight
+        self.slot_attention.self.query.weight = self.attention.self.query.weight
+        self.slot_attention.self.key.weight = self.attention.self.key.weight
+        self.slot_attention.self.value.weight = self.attention.self.value.weight
+        self.slot_attention.output.dense.weight = self.attention.output.dense.weight
 
     def full_share(self):
-        self.dialog_attention = self.attention
+        self.slot_attention = self.attention
 
-    def forward(self, hidden_states, attention_mask, attn_cache=None, turns=0):
+    def from_scratch(self):
+        pass
+
+    def _do_slot_attention(self, x, attention_mask, slot_dim):
+        _, seq_len, h = x.size()
+        x = x.view(slot_dim, -1, seq_len, h).transpose(0, 1).reshape(-1, slot_dim * seq_len, h)
+        bs = x.size(0)
+        attention_mask = attention_mask.view(slot_dim, bs, seq_len).transpose(0, 1).reshape(bs, slot_dim * seq_len)[:, None, None, :]
+        x, _ = self.slot_attention(x, attention_mask)
+        x = x.view(bs, slot_dim, seq_len, h).transpose(0, 1).reshape(slot_dim * bs, seq_len, h)
+        return x
+
+    def forward(self, hidden_states, attention_mask, attn_cache=None, do_slot_attention=False, slot_mask=None, slot_dim=0):
         attention_output, attn_cache = self.attention(hidden_states, attention_mask, attn_cache=attn_cache)
-        if turns > 0:
-            attention_output = self._dialog_self_attention(attention_output, turns=turns)
+        if do_slot_attention:
+            assert slot_dim > 0
+            attention_output = self._do_slot_attention(attention_output, attention_mask=slot_mask, slot_dim=slot_dim)
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output, attn_cache
@@ -208,10 +208,16 @@ class BertLayer(nn.Module):
 class BertEncoder(nn.Module):
     def __init__(self, config):
         super(BertEncoder, self).__init__()
-        layer = BertLayer(config)
+        if config.layer_type == 'simple':
+            layer = BertLayer(config)
+        elif config.layer_type == 'slot':
+            layer = BertSlotLayer(config)
+        else:
+            raise RuntimeError(f"No compatible layer type for {config.layer_type}")
+        logger.info(f"Use {layer.__class__.__name__} as bert encoder layer.")
         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None, turns=0, **kwargs):
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None, **kwargs):
         all_encoder_layers = []
         attn_caches = []
         for layer_index, layer_module in enumerate(self.layer):
@@ -219,7 +225,7 @@ class BertEncoder(nn.Module):
                 attn_cache = all_attn_cache[layer_index]
             else:
                 attn_cache = None
-            hidden_states, attn_cache = layer_module(hidden_states, attention_mask, attn_cache=attn_cache, turns=turns, **kwargs)
+            hidden_states, attn_cache = layer_module(hidden_states, attention_mask, attn_cache=attn_cache, **kwargs)
             attn_caches.append(attn_cache)
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
@@ -281,7 +287,7 @@ class BertModel(BertPreTrainedModel):
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, output_all_encoded_layers=True,
-                start_offset=0, all_attn_cache=None, turns=0, **kwargs):
+                start_offset=0, all_attn_cache=None, **kwargs):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
         if token_type_ids is None:
@@ -302,47 +308,17 @@ class BertModel(BertPreTrainedModel):
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
-        embedding_output = self.embeddings(input_ids, token_type_ids, start_offset=start_offset, turns=turns)
+        embedding_output = self.embeddings(input_ids, token_type_ids, start_offset=start_offset)
         encoded_layers, attn_caches = self.encoder(embedding_output,
                                                    extended_attention_mask,
                                                    output_all_encoded_layers=output_all_encoded_layers,
                                                    all_attn_cache=all_attn_cache,
-                                                   turns=turns,
                                                    **kwargs)
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
         return encoded_layers, pooled_output, attn_caches
-
-
-class DialogTransformer(BertPreTrainedModel):
-    def __init__(self, config):
-        super(DialogTransformer, self).__init__(config)
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.encoder = BertEncoder(config)
-        self.apply(self.init_bert_weights)
-
-    def forward(self, hidden, attention_mask=None, output_all_encoded_layers=False):
-        seq_length = hidden.size(1)
-        position_ids = torch.arange(seq_length, dtype=torch.long, device=hidden.device)
-        hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids).unsqueeze(0).expand_as(hidden))
-        hidden = self.dropout(hidden)
-
-        if attention_mask is None:
-            attention_mask = hidden.new_ones(hidden.size()[:-1], dtype=torch.long)
-        causal_mask = position_ids[None, None, :].repeat(hidden.size(0), seq_length, 1) <= position_ids[None, :, None]
-        extended_mask = causal_mask[:, None, :, :].long() * attention_mask[:, None, None, :]
-        extended_mask = extended_mask.to(hidden.dtype)
-        extended_mask = (1.0 - extended_mask) * -10000.0
-
-        hidden, _ = self.encoder(hidden, extended_mask, output_all_encoded_layers=output_all_encoded_layers)
-        if not output_all_encoded_layers:
-            hidden = hidden[-1]
-        return hidden
 
 
 class SimpleDialogSelfAttention(BertPreTrainedModel):

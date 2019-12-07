@@ -556,6 +556,7 @@ def main():
     parser.add_argument('--transpose_layer', default=-1, type=int)
     parser.add_argument('--share_position_weight', default=False, action='store_true')
     parser.add_argument('--slot_attention_type', default=-1, type=int)
+    parser.add_argument('--share_type', type=str, default='full_share', help="full_share, share_weight, copy_weight")
 
     args = parser.parse_args()
 
@@ -699,6 +700,12 @@ def main():
     elif args.nbt == 'slot':
         logger.info("Use self-attention neural belief tracker and add slot attention in bert")
         from BeliefTrackerShareSA_slot import BeliefTracker
+    elif args.nbt == 'dialog':
+        logger.info("Use dialog attention composed in BERT as neural belief trakcer")
+        from BeliefTrackerShareDialog import BeliefTracker
+    elif args.nbt == 'flat_slot':
+        logger.info("Use self-attention neural belief trakcer and flat slot attention in bert")
+        from BeliefTrackerShareSA_flat_slot import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
