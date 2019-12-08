@@ -557,6 +557,7 @@ def main():
     parser.add_argument('--share_position_weight', default=False, action='store_true')
     parser.add_argument('--slot_attention_type', default=-1, type=int)
     parser.add_argument('--share_type', type=str, default='full_share', help="full_share, share_weight, copy_weight")
+    parser.add_argument('--key_type', type=int, default=0)
 
     args = parser.parse_args()
 
@@ -706,6 +707,15 @@ def main():
     elif args.nbt == 'flat_slot':
         logger.info("Use self-attention neural belief trakcer and flat slot attention in bert")
         from BeliefTrackerShareSA_flat_slot import BeliefTracker
+    elif args.nbt == 'all_slot':
+        logger.info("Use self-attention neural belief tracker and all slot attended into attention")
+        from BeliefTrackerShareSA_all_slot import BeliefTracker
+    elif args.nbt == 'flat_test':
+        logger.info("This is a test for flat slot attention with unified attention mask.")
+        from BeliefTrackerShareSA_flat_test import BeliefTracker
+    elif args.nbt == 'extend':
+        logger.info("This model uses a extended attention module")
+        from BeliefTrackerShareSA_double_attn import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

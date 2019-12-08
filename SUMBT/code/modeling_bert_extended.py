@@ -84,6 +84,7 @@ class BertSelfAttention(nn.Module):
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.key_type = config.key_type
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -113,6 +114,30 @@ class BertSelfAttention(nn.Module):
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
         attention_scores = attention_scores + attention_mask
+
+        if attn_cache is not None:
+            """
+            :total_len = slot_dim * max_slot_length
+            :attention_scores: [bs, head_num, total_len, max_seq_length + total_len]
+            :attended_cache: [bs, head_num, total_len, h]
+            """
+            cache_length = attn_cache["key"].size(1)  # [batch, max_seq_length, h]
+            cache_scores = attention_scores[:, :, :, :cache_length]
+            attended_cache = self.dropout(nn.Softmax(dim=-1)(cache_scores)).matmul(self.transpose_for_scores(attn_cache["value"]))
+            extra_mask = attn_cache["full_mask"]
+            # TODO: Test the type of key
+            #  0. Use `attended_cache` as key and `attended_cache` as value too.
+            #  1. Use previous key: `key_layer[:, :, cache_length:]`
+            # ================ 0 ================
+            if self.key_type == 0:
+                attention_scores = torch.cat([attention_scores[:, :, :, cache_length:] + extra_mask, attention_scores], dim=-1)
+            # =============== 1 =================
+            elif self.key_type == 1:
+                extra_scores = torch.matmul(query_layer, attended_cache.transpose(-1, -2))
+                attention_scores = torch.cat([extra_scores + extra_mask, attention_scores], dim=-1)
+            else:
+                raise RuntimeError(f"Wrong key type for {self.key_type}")
+            value_layer = torch.cat([attended_cache, value_layer], dim=2)
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
