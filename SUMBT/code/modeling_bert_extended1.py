@@ -114,37 +114,43 @@ class BertSelfAttention(nn.Module):
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores = attention_scores + attention_mask
+
         if attn_cache is not None:
             """
             :total_len = slot_dim * max_slot_length
             :attention_scores: [bs, head_num, total_len, seq_length + total_len]
             :seq_att_value: [bs, head_num, total_len, h]
+            :value_layer: [bs, head_num, seq_len + total_len, h]
+            
+            Note, the attention mask here don't need to mask tokens between different slots to keep initial scores.
             """
             seq_length = attn_cache["key"].size(1)
             slot_att_scores = attention_scores[:, :, :, seq_length:]
-            attention_scores = attention_scores + attention_mask
             seq_att_scores = attention_scores[:, :, :, :seq_length]
             seq_att_value = self.dropout(nn.Softmax(dim=-1)(seq_att_scores)).matmul(self.transpose_for_scores(attn_cache["value"]))
 
-            extra_mask = attn_cache["full_mask"]  # for each slot's tokens, mask themselves and keep other slots' tokens
+            seq_value = value_layer[:, :, :seq_length]
+            slot_value = value_layer[:, :, seq_length:]
+
+            # for each slot's tokens, mask themselves and keep other slots' tokens
+            # 0/1, not -inf, for this mask is used to replace values
+            extra_mask = attn_cache["full_mask"]
             #  The type of key
             #  0. Use previous key: `key_layer[:, :, cache_length:]`
             #  1. Use `attended_cache` as key and `attended_cache` as value too.
             # ================ 0 ================
             if self.key_type == 0:
-                attention_scores = torch.cat([slot_att_scores + extra_mask, attention_scores], dim=-1)
-                value_layer = torch.cat([seq_att_value, value_layer], dim=2)
-                # FIXME: Fix the bug: the attention_scores[:, :, :, cache_length:] has been masked before.
-                # attention_scores = torch.cat([attention_scores[:, :, :, cache_length:] + extra_mask, attention_scores], dim=-1)
+                pass
             # =============== 1 =================
             elif self.key_type == 1:
-                extra_scores = torch.matmul(query_layer, seq_att_value.transpose(-1, -2))
-                attention_scores = torch.cat([extra_scores + extra_mask, attention_scores], dim=-1)
-                value_layer = torch.cat([seq_att_value, value_layer], dim=2)
+                new_value_scores = torch.matmul(query_layer, seq_att_value.transpose(-1, -2))
+                new_slot_att_scores = extra_mask * new_value_scores + (1 - extra_mask) * slot_att_scores
+                attention_scores = torch.cat([seq_att_scores, new_slot_att_scores], dim=-1)
             else:
                 raise RuntimeError(f"Wrong key type for {self.key_type}")
-        else:
-            attention_scores = attention_scores + attention_mask
+            new_slot_value = extra_mask * seq_att_value + (1 - extra_mask) * slot_value
+            value_layer = torch.cat([seq_value, new_slot_value], dim=2)
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
@@ -326,7 +332,7 @@ class BertModel(BertPreTrainedModel):
         # Since we are adding it to the raw scores before the softmax, this is
         # effectively the same as removing these entirely.
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
-        extended_attention_mask = (1.0 - extended_attention_mask) * -50000.0
+        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
         embedding_output = self.embeddings(input_ids, token_type_ids, position_ids=position_ids, start_offset=start_offset)
         encoded_layers, attn_caches = self.encoder(embedding_output,

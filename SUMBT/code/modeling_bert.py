@@ -684,3 +684,23 @@ class DialogReshape:
         bs = self.dialog_size * self.turn_size
         slot = slot.reshape(self.slot_dim, self.slot_len, h).unsqueeze(1).expand(-1, bs, -1, -1).reshape(-1, self.slot_len, h)
         return slot, self.concat_mask[:, None, None, :].to(dtype=slot.dtype)
+
+
+# ==========================================
+# Function
+# ==========================================
+
+
+def masked_softmax(vector: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    if mask is None:
+        result = torch.nn.functional.softmax(vector, dim=dim)
+    else:
+        mask = mask.float()
+        while mask.dim() < vector.dim():
+            mask = mask.unsqueeze(1)
+
+        # To limit numerical errors from large vector elements outside the mask, we zero these out.
+        result = torch.nn.functional.softmax(vector * mask, dim=dim)
+        result = result * mask
+        result = result / (result.sum(dim=dim, keepdim=True) + 1e-13)
+    return result

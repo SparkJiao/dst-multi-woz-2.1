@@ -1,6 +1,6 @@
 #!/bin/bash
 
-output_dir=exp-multiwoz/data2.0-share-sa-extend1.0  # --share_position_weight
+output_dir=exp-multiwoz/data2.0-share-sa-extend1.1  # --share_position_weight
 target_slot='all'
 nbt='extend'
 bert_dir='/home/jiaofangkai/'
