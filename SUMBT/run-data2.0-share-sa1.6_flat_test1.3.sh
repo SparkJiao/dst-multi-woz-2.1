@@ -1,9 +1,11 @@
 #!/bin/bash
 
-output_dir=exp-multiwoz/data2.0-share-sa-extend1.1
-output_dir=exp-multiwoz/data2.0-share-sa-extend1.1.1  # learning_rate 5e-5 -> 4e-5 num_train_epochs 6 -> 8
+#output_dir=exp-multiwoz/data2.0-share-sa1.6-flat_test
+#output_dir=exp-multiwoz/data2.0-share-sa1.6-flat_test-1.1  # masked value replace -10000.0 with -40000.0
+#output_dir=exp-multiwoz/data2.0-share-sa1.6-flat_test-1.2  # -40000.0 -> -10000.0, fp level O2 -> O1
+output_dir=exp-multiwoz/data2.0-share-sa1.6-flat_test-1.3  # fp level O1 -> O2, num_trian_epochs 6 -> 8 learning_rate 5e-5 -> 4e-5
 target_slot='all'
-nbt='extend'
+nbt='flat_test'
 bert_dir='/home/jiaofangkai/'
 
 python code/main-multislot-share.py --do_train --do_eval --num_train_epochs 6 --data_dir data/multiwoz2.0 \
@@ -13,4 +15,4 @@ python code/main-multislot-share.py --do_train --do_eval --num_train_epochs 6 --
 --tf_dir tensorboard --max_seq_length 96 --max_turn_length 22 \
 --fp16 --fp16_opt_level O2 --gradient_accumulation_steps 1 \
 --reduce_layers 0 --max_label_length 17 --max_slot_length 6 \
---override_attn --share_position_weight --key_type 1
+--override_attn --share_position_weight

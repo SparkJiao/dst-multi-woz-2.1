@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #output_dir=exp-multiwoz/data2.0-share-sa1.6-flat_test
-output_dir=exp-multiwoz/data2.0-share-sa1.6-flat_test-1.1  # masked value replace -10000.0 with -40000.0
+output_dir=exp-multiwoz/data2.0-share-sa1.6-flat_test-1.1  # masked value replace -10000.0 with -50000.0
 target_slot='all'
 nbt='flat_test'
 bert_dir='/home/jiaofangkai/'
