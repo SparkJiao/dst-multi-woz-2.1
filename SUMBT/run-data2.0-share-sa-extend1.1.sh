@@ -1,6 +1,6 @@
 #!/bin/bash
 
-output_dir=exp-multiwoz/data2.0-share-sa-extend1.1
+#output_dir=exp-multiwoz/data2.0-share-sa-extend1.1
 output_dir=exp-multiwoz/data2.0-share-sa-extend1.1.1  # learning_rate 5e-5 -> 4e-5 num_train_epochs 6 -> 8
 target_slot='all'
 nbt='extend'
