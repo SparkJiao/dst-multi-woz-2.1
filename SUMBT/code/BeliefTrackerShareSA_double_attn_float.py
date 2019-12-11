@@ -1,33 +1,36 @@
-import math
 import os.path
+import logging
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 from torch.nn import CrossEntropyLoss
 
 try:
     from . import layers
-    from .modeling_bert import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from .modeling_bert_extended_float import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
 except ImportError:
     import layers
-    from modeling_bert import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from modeling_bert_extended_float import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+
+logger = logging.getLogger(__name__)
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
-    def __init__(self, config, reduce_layers: int = 0):
+    def __init__(self, config, reduce_layers: int = 0, key_type: int = -1):
         super(BertForUtteranceEncoding, self).__init__(config)
-        print(f'Reduce {reduce_layers} of BERT.')
+        logger.info(f'Reduce {reduce_layers} of BERT.')
+        logger.info(f'Use key type: {key_type}')
         config.num_hidden_layers = config.num_hidden_layers - reduce_layers
         config.slot_attention_type = -1
+        config.key_type = key_type
         self.config = config
         self.bert = BertModel(config)
 
-    def forward(self, input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False,
+    def forward(self, input_ids, token_type_ids, attention_mask, position_ids=None, output_all_encoded_layers=False,
                 start_offset=0, all_attn_cache=None):
-        return self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=output_all_encoded_layers,
-                         start_offset=start_offset, all_attn_cache=all_attn_cache)
+        return self.bert(input_ids, token_type_ids, attention_mask, position_ids=position_ids,
+                         output_all_encoded_layers=output_all_encoded_layers, start_offset=start_offset, all_attn_cache=all_attn_cache)
 
 
 class BeliefTracker(nn.Module):
@@ -45,9 +48,9 @@ class BeliefTracker(nn.Module):
         self.attn_head = args.attn_head
         self.device = device
 
-        ### Utterance Encoder
+        # Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(
-            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers
+            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers, key_type=args.key_type
         )
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
@@ -59,7 +62,7 @@ class BeliefTracker(nn.Module):
             for p in self.utterance_encoder.bert.parameters():
                 p.requires_grad = False
 
-        ### values Encoder (not trainable)
+        # values Encoder (not trainable)
         self.sv_encoder = BertForUtteranceEncoding.from_pretrained(
             os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'))
         for p in self.sv_encoder.bert.parameters():
@@ -84,16 +87,7 @@ class BeliefTracker(nn.Module):
             print("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
-        self.do_cross_slot_attention = args.across_slot
-        if args.across_slot:
-            print("Add cross slot attention")
-            print(f"Cross slot attention add layer norm: {args.ss_add_layer_norm}")
-            self.slot_attention = SimpleSelfAttention(nbt_config, add_output=True,
-                                                      add_layer_norm=args.ss_add_layer_norm)
-        else:
-            self.slot_attention = None
-
-        ### Measure
+        # Measure
         self.distance_metric = args.distance_metric
         if self.distance_metric == "cosine":
             self.metric = torch.nn.CosineSimilarity(dim=-1, eps=1e-08)
@@ -102,10 +96,10 @@ class BeliefTracker(nn.Module):
         elif self.distance_metric == 'product':
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
-        ### Classifier
+        # Classifier
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
 
-        ### Etc.
+        # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids):
@@ -114,9 +108,11 @@ class BeliefTracker(nn.Module):
 
         # register slot input buffer
         slot_mask = slot_ids > 0
+        slot_position_ids = torch.arange(self.max_slot_length, dtype=torch.long, device=slot_ids.device) + self.max_seq_length
 
         self.register_buffer("slot_ids", slot_ids)
-        self.register_buffer("slot_mask", slot_mask)
+        self.register_buffer("slot_mask", slot_mask.to(dtype=torch.long))
+        self.register_buffer("slot_position_ids", slot_position_ids)
 
         with torch.no_grad():
             for s, label_id in enumerate(label_ids):
@@ -161,33 +157,41 @@ class BeliefTracker(nn.Module):
         slot_dim = len(target_slot)
 
         # Utterance encoding
-        # token_type_ids, attention_mask = self._make_aux_tensors(input_ids, input_len)
-
         _, _, all_attn_cache = self.utterance_encoder(input_ids.view(-1, self.max_seq_length),
                                                       token_type_ids.view(-1, self.max_seq_length),
                                                       attention_mask.view(-1, self.max_seq_length),
                                                       output_all_encoded_layers=False)
 
         # Domain-slot encoding
-        slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
-        slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+        slot_ids = self.slot_ids.unsqueeze(0).expand(bs, -1, -1).reshape(bs, slot_dim * self.max_slot_length)
+        # (slot_dim, slot_dim, 1)
+        unified_slot_mask = torch.diag(torch.ones(slot_dim, dtype=torch.long, device=slot_ids.device))[:, :, None]
+        # (slot_dim, slot_dim, max_slot_length) -> (1, slot_dim, 1, slot_dim, max_slot_length)
+        slot_mask = (self.slot_mask[None, :, :] * unified_slot_mask)[None, :, None, :, :]
+        assert slot_mask.size() == (1, slot_dim, 1, slot_dim, self.max_slot_length)
+        total_len = slot_dim * self.max_slot_length
+        slot_mask = slot_mask.expand(bs, -1, self.max_slot_length, -1, -1).reshape(bs, total_len, total_len)
         slot_mask = torch.cat(
-            [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
-             slot_mask], dim=-1)
-        assert slot_ids.size(0) == slot_dim * bs
-        for attn_cache in all_attn_cache:
-            for k in attn_cache:
-                attn_cache[k] = attn_cache[k].unsqueeze(0).expand(slot_dim, -1, -1, -1) \
-                    .reshape(slot_dim * bs, self.max_seq_length, -1)
-        hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=None, attention_mask=slot_mask,
-                                              output_all_encoded_layers=False, start_offset=self.max_seq_length,
-                                              all_attn_cache=all_attn_cache)
-        hidden = hidden[:, 0].view(slot_dim, ds, ts, -1)
+            [attention_mask.unsqueeze(2).expand(-1, -1, total_len, -1).reshape(bs, total_len, self.max_seq_length).to(
+                dtype=slot_ids.dtype), slot_mask], dim=2
+        )
 
-        if self.do_cross_slot_attention:
-            hidden = hidden.view(slot_dim, bs, -1).transpose(0, 1)
-            hidden = self.slot_attention(hidden, None).transpose(0, 1).reshape(slot_dim, ds, ts, -1)
-        hidden = hidden.view(slot_dim * ds, ts, self.bert_output_dim)
+        slot_mask_cont = (self.slot_mask[None, :, :] * (1 - unified_slot_mask))[None, :, None, :, :]
+        slot_mask_cont = slot_mask_cont.expand(bs, -1, self.max_slot_length, -1, -1).reshape(bs, total_len, total_len)
+        # slot_mask_cont = slot_mask_cont[:, None, :, :].to(next(self.parameters()).dtype)
+        slot_mask_cont = (1 - slot_mask_cont[:, None, :, :]).byte()
+        # slot_mask_cont = (1. - slot_mask_cont) * -10000.0
+        for attn_cache in all_attn_cache:
+            attn_cache["full_mask"] = slot_mask_cont
+
+        slot_position_ids = self.slot_position_ids[None, :].repeat(bs, slot_dim)
+
+        hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=None, attention_mask=slot_mask,
+                                              output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
+                                              position_ids=slot_position_ids)
+        # hidden = hidden[:, 0].view(slot_dim, ds, ts, -1)
+        hidden = hidden.view(bs, slot_dim, self.max_slot_length, self.bert_output_dim)
+        hidden = hidden[:, :, 0].transpose(0, 1).reshape(slot_dim * ds, ts, self.bert_output_dim)
 
         # NBT
         hidden = self.transformer(hidden, None).view(slot_dim, ds, ts, -1)
@@ -197,7 +201,7 @@ class BeliefTracker(nn.Module):
         loss_slot = []
         pred_slot = []
         output = []
-        for s, slot_id in enumerate(target_slot):  ## note: target_slots are successive
+        for s, slot_id in enumerate(target_slot):  # note: target_slots are successive
             # loss calculation
             hid_label = self.value_lookup[slot_id].weight
             num_slot_labels = hid_label.size(0)

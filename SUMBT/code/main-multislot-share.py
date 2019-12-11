@@ -716,6 +716,9 @@ def main():
     elif args.nbt == 'extend':
         logger.info("This model uses a extended attention module")
         from BeliefTrackerShareSA_double_attn import BeliefTracker
+    elif args.nbt == 'extend_float':
+        logger.info("This model uses a extended attention module with float softmax")
+        from BeliefTrackerShareSA_double_attn_float import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -889,9 +892,6 @@ def main():
                         acc = acc.mean()
                         acc_slot = acc_slot.mean(0)
 
-                # FIXME：
-                #  Joint accuracy is calculated as the average correct turns over all turns. So we should first calculate the correct
-                #  sum and then calculate average instead of calculate the average accuracy for all batches.
                 num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()  # valid turns for all current batch
                 # dev_loss += loss.item() * num_valid_turn
                 dev_acc += acc.item() * num_valid_turn
@@ -986,17 +986,6 @@ def main():
         logger.info(f'Loading saved model from {os.path.join(args.output_dir, state_name)}')
         output_model_file = os.path.join(args.output_dir, state_name)
 
-        # if args.local_rank != -1:
-        #     try:
-        #         from apex.parallel import DistributedDataParallel as DDP
-        #     except ImportError:
-        #         raise ImportError(
-        #             "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-        #
-        #     model = DDP(model)
-        # elif n_gpu > 1:
-        #     model = torch.nn.DataParallel(model)
-
         # in the case that slot and values are different between the training and evaluation
         ptr_model = torch.load(output_model_file)
         # Initialize slot value look up to avoid mismatch
@@ -1047,9 +1036,13 @@ def main():
             eval_loss_slot, eval_acc_slot = None, None
             nb_eval_steps, nb_eval_examples = 0, 0
 
-            accuracies = {'joint7': 0, 'slot7': 0, 'joint5': 0, 'slot5': 0, 'joint_rest': 0, 'slot_rest': 0,
-                          'num_turn': 0, 'num_slot7': 0, 'num_slot5': 0, 'num_slot_rest': 0,
-                          'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0}
+            accuracies = {'joint7': 0, 'slot7': 0, 'num_slot7': 0, 'num_turn': 0,
+                          'joint5': 0, 'slot5': 0, 'num_slot5': 0,
+                          'joint_rest': 0, 'slot_rest': 0, 'num_slot_rest': 0,
+                          'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0,
+                          'joint_hotel': 0, 'slot_hotel': 0, 'num_slot_hotel': 0,
+                          'joint_attraction': 0, 'slot_attraction': 0, 'num_slot_attraction': 0,
+                          'joint_train': 0, 'slot_train': 0, 'num_slot_train': 0}
 
             for input_ids, token_type_ids, input_mask, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
                 input_ids = input_ids.to(device)
@@ -1125,17 +1118,28 @@ def main():
             out_file_name = f'eval_all_accuracies_{state_name}'
             with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
                 f.write(
-                    'joint acc (7 domain) : slot acc (7 domain) : joint acc (5 domain): slot acc (5 domain): joint restaurant : slot acc restaurant : joint taxi : slot acc taxi \n')
-                f.write('%.5f : %.5f : %.5f : %.5f : %.5f : %.5f : %.5f : %.5f \n' % (
-                    (accuracies['joint7'] / accuracies['num_turn']).item(),
-                    (accuracies['slot7'] / accuracies['num_slot7']).item(),
-                    (accuracies['joint5'] / accuracies['num_turn']).item(),
-                    (accuracies['slot5'] / accuracies['num_slot5']).item(),
-                    (accuracies['joint_rest'] / accuracies['num_turn']).item(),
-                    (accuracies['slot_rest'] / accuracies['num_slot_rest']).item(),
-                    (accuracies['joint_taxi'] / accuracies['num_turn']).item(),
-                    (accuracies['slot_taxi'] / accuracies['num_slot_taxi']).item()
-                ))
+                    'joint acc (7 domain) : %.5f \t slot acc (7 domain) : %.5f \n'
+                    'joint acc (5 domain) : %.5f \t slot acc (5 domain) : %.5f \n'
+                    'joint restaurant : %.5f \t slot acc restaurant : %.5f \n'
+                    'joint taxi : %.5f \t slot acc taxi : %.5f \n'
+                    'joint hotel : %.5f \t slot acc hotel : %.5f \n'
+                    'joint attraction : %.5f \t slot acc attraction : %.5f \n'
+                    'joint train : %.5f \t slot acc train %.5f \n' % (
+                        (accuracies['joint7'] / accuracies['num_turn']).item(),
+                        (accuracies['slot7'] / accuracies['num_slot7']).item(),
+                        (accuracies['joint5'] / accuracies['num_turn']).item(),
+                        (accuracies['slot5'] / accuracies['num_slot5']).item(),
+                        (accuracies['joint_rest'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_rest'] / accuracies['num_slot_rest']).item(),
+                        (accuracies['joint_taxi'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_taxi'] / accuracies['num_slot_taxi']).item(),
+                        (accuracies['joint_hotel'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_hotel'] / accuracies['num_slot_hotel']).item(),
+                        (accuracies['joint_attraction'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_attraction'] / accuracies['num_slot_attraction']).item(),
+                        (accuracies['joint_train'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_train'] / accuracies['num_slot_train']).item()
+                    ))
 
 
 def eval_all_accs(pred_slot, labels, accuracies):
@@ -1168,6 +1172,24 @@ def eval_all_accs(pred_slot, labels, accuracies):
     accuracies['joint_taxi'] += joint_acc
     accuracies['slot_taxi'] += slot_acc
     accuracies['num_slot_taxi'] += num_data
+
+    # attraction
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 0:3], labels[:, :, 0:3])
+    accuracies['joint_attraction'] += joint_acc
+    accuracies['slot_attraction'] += slot_acc
+    accuracies['num_slot_attraction'] += num_data
+
+    # hotel
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 8:18], labels[:, :, 8:18])
+    accuracies['joint_hotel'] += joint_acc
+    accuracies['slot_hotel'] += slot_acc
+    accuracies['num_slot_hotel'] += num_data
+
+    # train
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 29:], labels[:, :, 29:])
+    accuracies['joint_train'] += joint_acc
+    accuracies['slot_train'] += slot_acc
+    accuracies['num_slot_train'] += num_data
 
     pred_slot5 = torch.cat((pred_slot[:, :, 0:3], pred_slot[:, :, 8:]), 2)
     label_slot5 = torch.cat((labels[:, :, 0:3], labels[:, :, 8:]), 2)
