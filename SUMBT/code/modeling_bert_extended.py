@@ -178,47 +178,115 @@ class BertReshapeAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
+        self.key_type = config.key_type
+        logger.info(f"Key type is {self.key_type}")
+        if self.key_type in [2, 3]:
+            self.extra_key = nn.Linear(self.attention_head_size, self.attention_head_size)
+
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0):
+    def transpose_for_slot(self, x, slot_dim):
+        full_size, num_head, seq_len, h = x.size()  # (num_head, seq_len, h) / (num_head, len1, len2)
+        assert num_head in [self.num_attention_heads, 1]
+        bs = full_size // slot_dim
+        new_shape = (slot_dim, bs, num_head, seq_len, h)
+        x = x.view(*new_shape).permute(1, 2, 0, 3, 4)
+        new_shape = (bs, num_head, slot_dim * seq_len, h)
+        return x.reshape(*new_shape)
+
+    @staticmethod
+    def back_transpose_for_slot(x, slot_dim):
+        bs, num_head, total_len, h = x.size()  # (bs, num_head, slot_dim * len1, len2 / h)
+        seq_len = total_len // slot_dim
+        new_shape = (bs, num_head, slot_dim, seq_len, h)
+        x = x.view(*new_shape).permute(2, 0, 1, 3, 4)
+        new_shape = (slot_dim * bs, num_head, seq_len, h)
+        return x.reshape(*new_shape)
+
+    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0, slot_unified_mask=None):
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
 
-        new_attn_cache = {
-            "key": mixed_key_layer,
-            "value": mixed_value_layer
-        }
-
         # if attn_cache is not None:
-        #     mixed_key_layer = torch.cat([attn_cache["key"], mixed_key_layer], dim=1)
         #     mixed_value_layer = torch.cat([attn_cache["value"], mixed_value_layer], dim=1)
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
         key_layer = self.transpose_for_scores(mixed_key_layer)
         value_layer = self.transpose_for_scores(mixed_value_layer)
 
+        new_attn_cache = {
+            "key": key_layer,
+            "value": value_layer
+        }
+
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
+        single_dim_value = []
+        single_dim_len = 0
         if attn_cache is not None:
-            cache_key, cache_value = attn_cache["key"], attn_cache["value"]
-            cache_key = self.transpose_for_scores(cache_key)
-            cache_value = self.transpose_for_scores(cache_value)
-            bs, num_head, seq_len, h = cache_key.size(0)
+            """
+            :cache_key: (bs, num_head, seq_len, h)
+            :cache_value: (slot_dim * bs, seq_len, h)
+            :query_layer: (slot_dim * bs, num_head, slot_len, h)
+            :value_layer: (bs, num_head, seq_len + slot_len, h)
+            :attention_mask: (slot_dim * bs, 1, 1, seq_len + slot_len)
+            :slot_unified_mask: (slot_dim * bs, 1, 1, slot_dim * slot_len)
+            :attention_scores: (slot_dim * bs, num_head, slot_len, ...)
+            
+            While calculating attention scores, since for each token in all slots, the process of calculation is independent
+            so I transpose them into single dimension and transpose them back while normalization.
+            I split the `value` as several segments since the weighted sum is done in different dimension for them.
+            After the calculation, sum the sums for all segments.
+            This method will have little drop on the time of forwarding, but will also save much memory.
+            """
+            cache_key = attn_cache["key"]
+            bs, num_head, seq_len, h = cache_key.size()
             slot_len = query_layer.size(2)
-            query_layer = query_layer.view(slot_dim, bs, num_head, slot_len, h).permute(1, 2, 0, 3, 4)
-            query_layer = query_layer.reshape(bs, num_head, slot_dim * slot_len, h)
-            cache_scores = torch.matmul(query_layer, cache_key) # (bs, num_head, slot_dim * slot_len, seq_len)
-            cache_scores = cache_scores.view(bs, num_head, slot_dim, slot_len, seq_len).permute(2, 0, 1, 3, 4)
-            cache_scores = cache_scores.reshape(-1, num_head, slot_len, seq_len) / math.sqrt(self.attention_head_size)
-            attention_scores = torch.cat([cache_scores, attention_scores], dim=-1)
-            value_layer = torch.cat([cache_value, value_layer], dim=2)
+            total_len = slot_dim * slot_len
+            # query_layer = query_layer.view(slot_dim, bs, num_head, slot_len, h).permute(1, 2, 0, 3, 4)
+            # query_layer = query_layer.reshape(bs, num_head, total_len, h)
+            query_layer = self.transpose_for_slot(query_layer, slot_dim)
+            cache_scores = torch.matmul(query_layer, cache_key.transpose(-1, -2))  # (bs, num_head, slot_dim * slot_len, seq_len)
 
+            extra_scores = []
+            if self.key_type in [1, 2, 3]:
+                assert slot_unified_mask.size() == (slot_dim * bs, 1, 1, total_len)
+                # (bs, num_head, slot_dim * slot_len, h)
+                ini_mask = attention_mask.view(slot_dim, bs, 1, 1, seq_len + slot_len)[0, :, :, :, :seq_len]
+                seq_att_value = nn.Softmax(dim=-1)(
+                    cache_scores / math.sqrt(self.attention_head_size) + ini_mask
+                ).matmul(attn_cache["value"])
+                # (bs, num_head, slot_dim * slot_len, slot_dim * slot_len)
+                if self.key_type == 3:
+                    seq_att_value = seq_att_value.detach()
+                if self.key_type == 1:
+                    seq_value_scores = query_layer.matmul(seq_att_value.transpose(-1, -2))
+                else:
+                    seq_value_scores = query_layer.matmul(self.extra_key(seq_att_value).transpose(-1, -2))
+                # seq_value_scores = seq_value_scores.view(bs, num_head, slot_dim, slot_len, total_len).permute(2, 0, 1, 3, 4)
+                # extra_scores.append(seq_value_scores.reshape(-1, num_head, slot_len, total_len))
+                seq_value_scores = self.back_transpose_for_slot(seq_value_scores, slot_dim)
+                extra_scores.append(seq_value_scores)
+                # value_layer = torch.cat([
+                #     seq_att_value.unsqueeze(0).expand(slot_dim, -1, -1, -1, -1).reshape(-1, num_head, total_len, h),
+                #     value_layer], dim=2)
+                attention_mask = torch.cat([slot_unified_mask, attention_mask], dim=-1)
+                single_dim_value.append(seq_att_value)
+                single_dim_len += total_len
+
+            # cache_scores = cache_scores.view(bs, num_head, slot_dim, slot_len, seq_len).permute(2, 0, 1, 3, 4)
+            # cache_scores = cache_scores.reshape(-1, num_head, slot_len, seq_len)
+            cache_scores = self.back_transpose_for_slot(cache_scores, slot_dim)
+            attention_scores = torch.cat(extra_scores + [cache_scores, attention_scores], dim=-1)
+            single_dim_value.append(attn_cache["value"])
+            single_dim_len += seq_len
+
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
         attention_scores = attention_scores + attention_mask
 
@@ -229,7 +297,20 @@ class BertReshapeAttention(nn.Module):
         # seem a bit unusual, but is taken from the original Transformer paper.
         attention_probs = self.dropout(attention_probs)
 
-        context_layer = torch.matmul(attention_probs, value_layer)
+        if attn_cache is not None:
+            value_len = attention_probs.size(-1) - single_dim_len
+            single_dim_value = torch.cat(single_dim_value, dim=-2)
+            single_dim_probs, value_probs = torch.split(attention_probs, [single_dim_len, value_len], dim=-1)
+            # single_dim_probs = single_dim_probs.reshape(slot_dim, bs, num_head, slot_len, single_dim_len).permute(1, 2, 0, 3, 4)
+            # single_dim_probs = single_dim_probs.reshape(bs, num_head, slot_dim * slot_len, single_dim_len)
+            single_dim_probs = self.transpose_for_slot(single_dim_probs, slot_dim)
+            single_dim_context = single_dim_probs.matmul(single_dim_value)
+            single_dim_context = self.back_transpose_for_slot(single_dim_context, slot_dim)
+            value_context = value_probs.matmul(value_layer)
+            context_layer = single_dim_context + value_context
+        else:
+            context_layer = torch.matmul(attention_probs, value_layer)
+
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(*new_context_layer_shape)
@@ -239,11 +320,17 @@ class BertReshapeAttention(nn.Module):
 class BertAttention(nn.Module):
     def __init__(self, config):
         super(BertAttention, self).__init__()
-        self.self = BertSelfAttention(config)
+        if config.self_attention_type == 0:
+            self.self = BertSelfAttention(config)
+        elif config.self_attention_type == 1:
+            self.self = BertReshapeAttention(config)
+        else:
+            raise RuntimeError()
+        logger.info(f"Use {self.self.__class__.__name__} as self attention module of BERT")
         self.output = BertSelfOutput(config)
 
-    def forward(self, input_tensor, attention_mask, attn_cache=None):
-        self_output, attn_cache = self.self(input_tensor, attention_mask, attn_cache=attn_cache)
+    def forward(self, input_tensor, attention_mask, attn_cache=None, **kwargs):
+        self_output, attn_cache = self.self(input_tensor, attention_mask, attn_cache=attn_cache, **kwargs)
         attention_output = self.output(self_output, input_tensor)
         return attention_output, attn_cache
 
@@ -293,8 +380,8 @@ class BertLayer(nn.Module):
     def full_share(self):
         self.slot_attention = self.attention
 
-    def forward(self, hidden_states, attention_mask, attn_cache=None, do_slot_attention: bool = False):
-        attention_output, attn_cache = self.attention(hidden_states, attention_mask, attn_cache=attn_cache)
+    def forward(self, hidden_states, attention_mask, attn_cache=None, do_slot_attention: bool = False, **kwargs):
+        attention_output, attn_cache = self.attention(hidden_states, attention_mask, attn_cache=attn_cache, **kwargs)
         if self.slot_attention_type != -1 and do_slot_attention:
             attention_output = self.slot_seq_attention(attention_output)
         intermediate_output = self.intermediate(attention_output)

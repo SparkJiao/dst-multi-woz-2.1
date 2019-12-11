@@ -16,15 +16,14 @@ except ImportError:
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
-    def __init__(self, config, reduce_layers: int = 0, key_type: int = 0, self_attention_type: int = 0):
+    def __init__(self, config, reduce_layers: int = 0, self_attention_type: int = 0):
         super(BertForUtteranceEncoding, self).__init__(config)
         print(f'Reduce {reduce_layers} of BERT.')
-        print(f'Use key type: {key_type}')
-        print(f'Use Self Attention Type: {self_attention_type}')
+        print(f'Self Attention Type: {self_attention_type}')
         config.num_hidden_layers = config.num_hidden_layers - reduce_layers
         config.slot_attention_type = -1
+        config.key_type = 0
         config.self_attention_type = self_attention_type
-        config.key_type = key_type
         self.config = config
         self.bert = BertModel(config)
 
@@ -53,7 +52,7 @@ class BeliefTracker(nn.Module):
         # Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(
             os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers,
-            self_attention_type=args.self_attention_type, key_type=args.key_type
+            self_attention_type=args.self_attention_type
         )
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
@@ -169,20 +168,14 @@ class BeliefTracker(nn.Module):
         slot_mask = torch.cat(
             [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
              slot_mask.to(dtype=attention_mask.dtype)], dim=-1)
-        # (slot_dim, slot_dim, 1)
-        unified_slot_mask = torch.diag(torch.ones(slot_dim, dtype=torch.long, device=slot_ids.device))[:, :, None]
-        # (1, slot_dim, slot_len) * (slot_dim, slot_dim, 1) -> (slot_dim, slot_dim, slot_len) -> (slot_dim, 1, slot_dim, slot_len)
-        slot_mask_cont = (self.slot_mask[None, :, :] * (1 - unified_slot_mask))[:, None, :, :]
-        slot_mask_cont = slot_mask_cont.expand(-1, bs, -1, -1).reshape(slot_dim * bs, slot_dim * self.max_slot_length)
-        slot_mask_cont = slot_mask_cont[:, None, None, :].to(next(self.parameters()).dtype)
 
+        # assert slot_ids.size(0) == slot_dim * bs
         # for attn_cache in all_attn_cache:
         #     attn_cache["value"] = attn_cache["value"].unsqueeze(0).expand(slot_dim, -1, -1, -1) \
-        #         .reshape(slot_dim * bs, self.max_seq_length, -1)
-
+        #             .reshape(slot_dim * bs, self.max_seq_length, -1)
         hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=None, attention_mask=slot_mask,
                                               output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
-                                              slot_dim=slot_dim, slot_unified_mask=slot_mask_cont)
+                                              slot_dim=slot_dim)
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
 
         # NBT
@@ -193,7 +186,7 @@ class BeliefTracker(nn.Module):
         loss_slot = []
         pred_slot = []
         output = []
-        for s, slot_id in enumerate(target_slot):  # note: target_slots are successive
+        for s, slot_id in enumerate(target_slot):   # note: target_slots are successive
             # loss calculation
             hid_label = self.value_lookup[slot_id].weight
             num_slot_labels = hid_label.size(0)

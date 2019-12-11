@@ -558,6 +558,7 @@ def main():
     parser.add_argument('--slot_attention_type', default=-1, type=int)
     parser.add_argument('--share_type', type=str, default='full_share', help="full_share, share_weight, copy_weight")
     parser.add_argument('--key_type', type=int, default=0)
+    parser.add_argument('--self_attention_type', type=int, default=0)
 
     args = parser.parse_args()
 
@@ -719,6 +720,12 @@ def main():
     elif args.nbt == 'extend_float':
         logger.info("This model uses a extended attention module with float softmax")
         from BeliefTrackerShareSA_double_attn_float import BeliefTracker
+    elif args.nbt == 'flat_test1':
+        logger.info("This is another test for flat slot attention but self attention mask.")
+        from BeliefTrackerShareSA_flat_test1 import BeliefTracker
+    elif args.nbt == 'extend_new':
+        logger.info("This model uses a new extended attention module")
+        from BeliefTrackerShareSA_double_attn1 import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
