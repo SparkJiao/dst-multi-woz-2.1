@@ -124,7 +124,8 @@ class BertSelfAttention(nn.Module):
             slot_att_scores = attention_scores[:, :, :, seq_length:]
             attention_scores = attention_scores + attention_mask
             seq_att_scores = attention_scores[:, :, :, :seq_length]
-            seq_att_value = self.dropout(nn.Softmax(dim=-1)(seq_att_scores)).matmul(self.transpose_for_scores(attn_cache["value"]))
+            seq_att_value = self.dropout(nn.Softmax(dim=-1)(seq_att_scores)).matmul(
+                self.transpose_for_scores(attn_cache["value"]))
 
             extra_mask = attn_cache["full_mask"]  # for each slot's tokens, mask themselves and keep other slots' tokens
             #  The type of key
@@ -145,6 +146,81 @@ class BertSelfAttention(nn.Module):
                 raise RuntimeError(f"Wrong key type for {self.key_type}")
         else:
             attention_scores = attention_scores + attention_mask
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+        return context_layer, new_attn_cache
+
+
+class BertReshapeAttention(nn.Module):
+    def __init__(self, config):
+        super(BertReshapeAttention, self).__init__()
+        if config.hidden_size % config.num_attention_heads != 0:
+            raise ValueError(
+                "The hidden size (%d) is not a multiple of the number of attention "
+                "heads (%d)" % (config.hidden_size, config.num_attention_heads))
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0):
+        mixed_query_layer = self.query(hidden_states)
+        mixed_key_layer = self.key(hidden_states)
+        mixed_value_layer = self.value(hidden_states)
+
+        new_attn_cache = {
+            "key": mixed_key_layer,
+            "value": mixed_value_layer
+        }
+
+        # if attn_cache is not None:
+        #     mixed_key_layer = torch.cat([attn_cache["key"], mixed_key_layer], dim=1)
+        #     mixed_value_layer = torch.cat([attn_cache["value"], mixed_value_layer], dim=1)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+
+        if attn_cache is not None:
+            cache_key, cache_value = attn_cache["key"], attn_cache["value"]
+            cache_key = self.transpose_for_scores(cache_key)
+            cache_value = self.transpose_for_scores(cache_value)
+            bs, num_head, seq_len, h = cache_key.size(0)
+            slot_len = query_layer.size(2)
+            query_layer = query_layer.view(slot_dim, bs, num_head, slot_len, h).permute(1, 2, 0, 3, 4)
+            query_layer = query_layer.reshape(bs, num_head, slot_dim * slot_len, h)
+            cache_scores = torch.matmul(query_layer, cache_key) # (bs, num_head, slot_dim * slot_len, seq_len)
+            cache_scores = cache_scores.view(bs, num_head, slot_dim, slot_len, seq_len).permute(2, 0, 1, 3, 4)
+            cache_scores = cache_scores.reshape(-1, num_head, slot_len, seq_len) / math.sqrt(self.attention_head_size)
+            attention_scores = torch.cat([cache_scores, attention_scores], dim=-1)
+            value_layer = torch.cat([cache_value, value_layer], dim=2)
+
+        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
@@ -301,7 +377,8 @@ class BertModel(BertPreTrainedModel):
         self.pooler = BertPooler(config)
         self.apply(self.init_bert_weights)
 
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None, position_ids=None, output_all_encoded_layers=True,
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, position_ids=None,
+                output_all_encoded_layers=True,
                 start_offset=0, all_attn_cache=None, **kwargs):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
@@ -328,7 +405,8 @@ class BertModel(BertPreTrainedModel):
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
-        embedding_output = self.embeddings(input_ids, token_type_ids, position_ids=position_ids, start_offset=start_offset)
+        embedding_output = self.embeddings(input_ids, token_type_ids, position_ids=position_ids,
+                                           start_offset=start_offset)
         encoded_layers, attn_caches = self.encoder(embedding_output,
                                                    extended_attention_mask,
                                                    output_all_encoded_layers=output_all_encoded_layers,
@@ -714,5 +792,7 @@ class DialogReshape:
     def back_and_expand(self, slot):
         h = slot.size(-1)
         bs = self.dialog_size * self.turn_size
-        slot = slot.reshape(self.slot_dim, self.slot_len, h).unsqueeze(1).expand(-1, bs, -1, -1).reshape(-1, self.slot_len, h)
+        slot = slot.reshape(self.slot_dim, self.slot_len, h).unsqueeze(1).expand(-1, bs, -1, -1).reshape(-1,
+                                                                                                         self.slot_len,
+                                                                                                         h)
         return slot, self.concat_mask[:, None, None, :].to(dtype=slot.dtype)
