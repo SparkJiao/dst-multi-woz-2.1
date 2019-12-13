@@ -169,13 +169,9 @@ class BeliefTracker(nn.Module):
             [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
              slot_mask.to(dtype=attention_mask.dtype)], dim=-1)
 
-        # assert slot_ids.size(0) == slot_dim * bs
-        # for attn_cache in all_attn_cache:
-        #     attn_cache["value"] = attn_cache["value"].unsqueeze(0).expand(slot_dim, -1, -1, -1) \
-        #             .reshape(slot_dim * bs, self.max_seq_length, -1)
         hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=None, attention_mask=slot_mask,
                                               output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
-                                              slot_dim=slot_dim)
+                                              start_offset=self.max_seq_length, slot_dim=slot_dim)
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
 
         # NBT

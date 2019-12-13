@@ -572,12 +572,13 @@ def main():
 
     # Tensorboard logging
     if not args.do_not_use_tensorboard:
-        tb_file_name = args.output_dir.split('/')[1]
+        tb_file_name = '/'.join(args.output_dir.split('/')[1:])
         summary_writer = SummaryWriter("./%s/%s" % (args.tf_dir, tb_file_name))
     else:
         summary_writer = None
 
     # Logger
+    tb_file_name = tb_file_name.replace('/', '-')
     fileHandler = logging.FileHandler(os.path.join(args.output_dir, "%s.txt" % (tb_file_name)))
     logger.addHandler(fileHandler)
     logger.info(args)

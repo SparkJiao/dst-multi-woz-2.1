@@ -29,7 +29,9 @@ from torch import nn
 
 # from .file_utils import cached_path
 
-logger = logging.getLogger(__name__)
+from global_logger import get_child_logger
+
+logger = get_child_logger(__name__)
 
 
 class BertEmbeddings(nn.Module):
@@ -182,11 +184,31 @@ class BertReshapeAttention(nn.Module):
         logger.info(f"Key type is {self.key_type}")
         if self.key_type in [2, 3]:
             self.extra_key = nn.Linear(self.attention_head_size, self.attention_head_size)
+        elif self.key_type in [4, 5]:
+            self.extra_key = copy.deepcopy(self.key)
+            self.extra_value = copy.deepcopy(self.value)
+
+    def copy_weight(self):
+        self.extra_key = copy.deepcopy(self.key)
+        self.extra_value = copy.deepcopy(self.value)
+
+    def share_weight(self):
+        self.extra_key.weight = self.key.weight
+        self.extra_value.weight = self.value.weight
+
+    def full_share(self):
+        self.extra_key = self.key
+        self.extra_value = self.value
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
+
+    def back_transpose_for_scores(self, x):
+        x = x.permute(0, 2, 1, 3).contiguous()
+        new_x_shape = x.size()[:-2] + (self.all_head_size,)
+        return x.view(*new_x_shape)
 
     def transpose_for_slot(self, x, slot_dim):
         full_size, num_head, seq_len, h = x.size()  # (num_head, seq_len, h) / (num_head, len1, len2)
@@ -262,12 +284,22 @@ class BertReshapeAttention(nn.Module):
                     cache_scores / math.sqrt(self.attention_head_size) + ini_mask
                 ).matmul(attn_cache["value"])
                 # (bs, num_head, slot_dim * slot_len, slot_dim * slot_len)
-                if self.key_type == 3:
-                    seq_att_value = seq_att_value.detach()
+                # if self.key_type == 3:
+                #     seq_att_value = seq_att_value.detach()
                 if self.key_type == 1:
                     seq_value_scores = query_layer.matmul(seq_att_value.transpose(-1, -2))
-                else:
+                elif self.key_type in [2, 3]:
+                    if self.key_type == 3:
+                        seq_att_value = seq_att_value.detach()
                     seq_value_scores = query_layer.matmul(self.extra_key(seq_att_value).transpose(-1, -2))
+                elif self.key_type in [4, 5]:
+                    if self.key_type == 5:
+                        seq_att_value = seq_att_value.detach()
+                    seq_att_value_new_key = self.transpose_for_scores(self.extra_key(self.back_transpose_for_scores(seq_att_value)))
+                    seq_value_scores = query_layer.matmul(seq_att_value_new_key)
+                    seq_att_value = self.transpose_for_scores(self.extra_value(self.back_transpose_for_scores(seq_att_value)))
+                else:
+                    raise RuntimeError("Wrong key type !", self.key_type)
                 # seq_value_scores = seq_value_scores.view(bs, num_head, slot_dim, slot_len, total_len).permute(2, 0, 1, 3, 4)
                 # extra_scores.append(seq_value_scores.reshape(-1, num_head, slot_len, total_len))
                 seq_value_scores = self.back_transpose_for_slot(seq_value_scores, slot_dim)
@@ -535,110 +567,6 @@ class DialogTransformer(BertPreTrainedModel):
         return hidden
 
 
-class BertHalfEncoder(nn.Module):
-    def __init__(self, config):
-        super(BertHalfEncoder, self).__init__()
-        layer = BertLayer(config)
-        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
-
-    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None,
-                start_layer=None, end_layer=None):
-        all_encoder_layers = []
-        attn_caches = []
-
-        layer_start_index = start_layer if start_layer is not None else 0
-        layer_end_index = end_layer if end_layer is not None else len(self.layer)
-        layers = self.layer[layer_start_index: layer_end_index]
-
-        for layer_index, layer_module in enumerate(layers):
-            if all_attn_cache is not None:
-                attn_cache = all_attn_cache[layer_index]
-            else:
-                attn_cache = None
-            hidden_states, attn_cache = layer_module(hidden_states, attention_mask, attn_cache=attn_cache)
-            attn_caches.append(attn_cache)
-            if output_all_encoded_layers:
-                all_encoder_layers.append(hidden_states)
-        if not output_all_encoded_layers:
-            all_encoder_layers.append(hidden_states)
-        return all_encoder_layers, attn_caches
-
-
-class HalfBert(BertPreTrainedModel):
-    def __init__(self, config):
-        super(HalfBert, self).__init__(config)
-        self.embeddings = BertEmbeddings(config)
-        self.encoder = BertHalfEncoder(config)
-        self.pooler = BertPooler(config)
-        self.apply(self.init_bert_weights)
-
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None, output_all_encoded_layers=True,
-                start_offset=0, all_attn_cache=None, start_layer=None, end_layer=None):
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-        if token_type_ids is None:
-            token_type_ids = torch.zeros_like(input_ids)
-
-        # We create a 3D attention mask from a 2D tensor mask.
-        # Sizes are [batch_size, 1, 1, to_seq_length]
-        # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
-        # this attention mask is more simple than the triangular masking of causal attention
-        # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
-        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-
-        # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
-        # masked positions, this operation will create a tensor which is 0.0 for
-        # positions we want to attend and -10000.0 for masked positions.
-        # Since we are adding it to the raw scores before the softmax, this is
-        # effectively the same as removing these entirely.
-        extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
-        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-
-        embedding_output = self.embeddings(input_ids, token_type_ids, start_offset=start_offset)
-
-        encoded_layers, attn_caches = self.encoder(embedding_output,
-                                                   extended_attention_mask,
-                                                   output_all_encoded_layers=output_all_encoded_layers,
-                                                   all_attn_cache=all_attn_cache, start_layer=start_layer,
-                                                   end_layer=end_layer)
-        sequence_output = encoded_layers[-1]
-        pooled_output = self.pooler(sequence_output)
-        if not output_all_encoded_layers:
-            encoded_layers = encoded_layers[-1]
-        return encoded_layers, pooled_output, attn_caches
-
-
-class HalfDialogTransformer(BertPreTrainedModel):
-    def __init__(self, config, bert_encoder: BertHalfEncoder):
-        super(HalfDialogTransformer, self).__init__(config)
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        # self.encoder = BertEncoder(config)
-        self.apply(self.init_bert_weights)
-        self.encoder = bert_encoder
-
-    def forward(self, hidden, attention_mask=None, output_all_encoded_layers=False, start_layer=None, end_layer=None):
-        seq_length = hidden.size(1)
-        position_ids = torch.arange(seq_length, dtype=torch.long, device=hidden.device)
-        hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids).unsqueeze(0).expand_as(hidden))
-        hidden = self.dropout(hidden)
-
-        if attention_mask is None:
-            attention_mask = hidden.new_ones(hidden.size()[:-1], dtype=torch.long)
-        causal_mask = position_ids[None, None, :].repeat(hidden.size(0), seq_length, 1) <= position_ids[None, :, None]
-        extended_mask = causal_mask[:, None, :, :].long() * attention_mask[:, None, None, :]
-        extended_mask = extended_mask.to(hidden.dtype)
-        extended_mask = (1.0 - extended_mask) * -10000.0
-
-        hidden, _ = self.encoder(hidden, extended_mask, output_all_encoded_layers=output_all_encoded_layers,
-                                 start_layer=start_layer, end_layer=end_layer)
-        if not output_all_encoded_layers:
-            hidden = hidden[-1]
-        return hidden
-
-
 class SimpleDialogSelfAttention(BertPreTrainedModel):
     def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False,
                  self_attention: BertSelfAttention = None):
@@ -793,59 +721,6 @@ class MultiHeadAttention(nn.Module):
         context_layer = context_layer.view(*new_context_layer_shape)
         return context_layer, (mixed_query_layer, mixed_key_layer, mixed_value_layer)
 
-
-# class SlotAttention(BertPreTrainedModel):
-#     def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False):
-#         super(SlotAttention, self).__init__(config)
-#         self.num_attention_heads = config.num_attention_heads
-#         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-#         self.all_head_size = self.num_attention_heads * self.attention_head_size
-#         # Attention between slot tokens and utterance tokens
-#         self.context_query = nn.Linear(config.hidden_size, self.all_head_size)
-#         self.context_key = nn.Linear(config.hidden_size, self.all_head_size)
-#         self.context_value = nn.Linear(config.hidden_size, self.all_head_size)
-#         # Attention between slot tokens(Only query and key)
-#         self.slot_query = nn.Linear(config.hidden_size, self.all_head_size)
-#         self.slot_key = nn.Linear(config.hidden_size, self.all_head_size)
-#
-#         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-#
-#         self.apply(self.init_bert_weights)
-#
-#     def transpose_for_scores(self, x):
-#         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-#         x = x.view(*new_x_shape)
-#         return x.permute(0, 2, 1, 3)
-#
-#     def forward(self, slot_hidden, context_hidden, slot_attention_mask=None, context_attention_mask=None):
-#         slot_dim, bs, slot_len, _ = slot_hidden.size()
-#
-#         context_query = self.transpose_for_scores(self.context_query(slot_hidden))
-#         context_key = self.transpose_for_scores(self.context_key(context_hidden))
-#         context_value = self.transpose_for_scores(self.context_value(context_hidden))
-#
-#         context_attention_scores = torch.matmul(context_query, context_key.transpose(-1, -2))
-#         context_attention_scores = context_attention_scores / math.sqrt(self.attention_head_size)
-#         context_attention_scores = context_attention_scores + context_attention_mask
-#
-#         # Normalize the attention scores to probabilities.
-#         context_attention_probs = nn.Softmax(dim=-1)(context_attention_scores)
-#
-#         # This is actually dropping out entire tokens to attend to, which might
-#         # seem a bit unusual, but is taken from the original Transformer paper.
-#         context_attention_probs = self.dropout(context_attention_probs)
-#
-#         slot_context = torch.matmul(context_attention_probs, context_value)
-#         slot_context = slot_context.permute(0, 2, 1, 3).contiguous()
-#         new_context_layer_shape = slot_context.size()[:-2] + (self.all_head_size,)
-#         slot_context = slot_context.view(*new_context_layer_shape)
-#
-#         return hidden
-
-
-# ====================
-# Function
-# ====================
 
 class DialogReshape:
     def __init__(self):

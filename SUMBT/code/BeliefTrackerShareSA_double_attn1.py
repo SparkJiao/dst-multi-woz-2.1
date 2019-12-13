@@ -10,17 +10,22 @@ from torch.nn import CrossEntropyLoss
 try:
     from . import layers
     from .modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from .global_logger import get_child_logger
 except ImportError:
     import layers
     from modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from global_logger import get_child_logger
+
+
+logger = get_child_logger(__name__)
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config, reduce_layers: int = 0, key_type: int = 0, self_attention_type: int = 0):
         super(BertForUtteranceEncoding, self).__init__(config)
-        print(f'Reduce {reduce_layers} of BERT.')
-        print(f'Use key type: {key_type}')
-        print(f'Use Self Attention Type: {self_attention_type}')
+        logger.info(f'Reduce {reduce_layers} of BERT.')
+        logger.info(f'Use key type: {key_type}')
+        logger.info(f'Use Self Attention Type: {self_attention_type}')
         config.num_hidden_layers = config.num_hidden_layers - reduce_layers
         config.slot_attention_type = -1
         config.self_attention_type = self_attention_type
@@ -55,13 +60,18 @@ class BeliefTracker(nn.Module):
             os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers,
             self_attention_type=args.self_attention_type, key_type=args.key_type
         )
+        logger.info(f"BertReshapeSelfAttention extra key and value initialization type: {args.share_type}")
+        if args.key_type in [4, 5]:
+            for layer in self.utterance_encoder.bert.encoder.layer:
+                getattr(layer.attention.self, args.share_type)()
+
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
         if args.fix_utterance_encoder:
             for p in self.utterance_encoder.bert.pooler.parameters():
                 p.requires_grad = False
         if args.fix_bert:
-            print('Fix all parameters of bert encoder')
+            logger.info('Fix all parameters of bert encoder')
             for p in self.utterance_encoder.bert.parameters():
                 p.requires_grad = False
 
@@ -76,10 +86,10 @@ class BeliefTracker(nn.Module):
         # NBT
         nbt_config = self.sv_encoder.config
         nbt_config.num_attention_heads = self.attn_head
-        print(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
+        logger.info(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
         if args.override_attn:
-            print("Override self attention from last layer of BERT")
+            logger.info("Override self attention from last layer of BERT")
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm,
                                                          self_attention=last_attention)
@@ -87,7 +97,7 @@ class BeliefTracker(nn.Module):
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm)
         if args.share_position_weight:
-            print("Dialog self attention will share position embeddings with BERT")
+            logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         # Measure
@@ -176,13 +186,9 @@ class BeliefTracker(nn.Module):
         slot_mask_cont = slot_mask_cont.expand(-1, bs, -1, -1).reshape(slot_dim * bs, slot_dim * self.max_slot_length)
         slot_mask_cont = slot_mask_cont[:, None, None, :].to(next(self.parameters()).dtype)
 
-        # for attn_cache in all_attn_cache:
-        #     attn_cache["value"] = attn_cache["value"].unsqueeze(0).expand(slot_dim, -1, -1, -1) \
-        #         .reshape(slot_dim * bs, self.max_seq_length, -1)
-
         hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=None, attention_mask=slot_mask,
                                               output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
-                                              slot_dim=slot_dim, slot_unified_mask=slot_mask_cont)
+                                              start_offset=self.max_seq_length, slot_dim=slot_dim, slot_unified_mask=slot_mask_cont)
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
 
         # NBT

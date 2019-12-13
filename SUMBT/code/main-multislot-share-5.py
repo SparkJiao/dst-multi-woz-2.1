@@ -17,6 +17,11 @@ from pytorch_pretrained_bert.optimization import BertAdam
 
 from tensorboardX import SummaryWriter
 
+try:
+    from .global_logger import register_logger
+except ImportError:
+    from global_logger import register_logger
+
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
@@ -578,6 +583,10 @@ def main():
     parser.add_argument('--across_slot', default=False, action='store_true')
     parser.add_argument('--override_attn', default=False, action='store_true')
     parser.add_argument('--share_position_weight', default=False, action='store_true')
+    parser.add_argument('--slot_attention_type', default=-1, type=int)
+    parser.add_argument('--share_type', type=str, default='full_share', help="full_share, share_weight, copy_weight")
+    parser.add_argument('--key_type', type=int, default=0)
+    parser.add_argument('--self_attention_type', type=int, default=0)
 
     args = parser.parse_args()
 
@@ -591,14 +600,16 @@ def main():
 
     # Tensorboard logging
     if not args.do_not_use_tensorboard:
-        tb_file_name = args.output_dir.split('/')[1]
+        tb_file_name = '/'.join(args.output_dir.split('/')[1:])
         summary_writer = SummaryWriter("./%s/%s" % (args.tf_dir, tb_file_name))
     else:
         summary_writer = None
 
     # Logger
+    tb_file_name = tb_file_name.replace('/', '-')
     fileHandler = logging.FileHandler(os.path.join(args.output_dir, "%s.txt" % (tb_file_name)))
     logger.addHandler(fileHandler)
+    register_logger(logger)
     logger.info(args)
 
     # CUDA setup
@@ -675,7 +686,8 @@ def main():
         else:
             train_sampler = DistributedSampler(train_data)
 
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
+        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size,
+                                      pin_memory=True, num_workers=4)
 
         ## Dev utterances
         all_input_ids_dev, all_input_len_dev, all_label_ids_dev = convert_examples_to_features(
@@ -714,6 +726,12 @@ def main():
     elif args.nbt == 'bert':
         logger.info("Initialize transformer dialog encoder from pre-trained BERT")
         from BeliefTrackerShareBert import BeliefTracker
+    elif args.nbt == 'flat_test1':
+        logger.info("This is another test for flat slot attention but self attention mask.")
+        from BeliefTrackerShareSA_flat_test1 import BeliefTracker
+    elif args.nbt == 'extend_new':
+        logger.info("This model uses a new extended attention module")
+        from BeliefTrackerShareSA_double_attn1 import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -809,7 +827,7 @@ def main():
             nb_tr_steps = 0
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
-                batch = tuple(t.to(device) for t in batch)
+                batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
                 input_ids, token_type_ids, input_mask, label_ids = batch
 
                 # Forward
@@ -887,9 +905,6 @@ def main():
                         acc = acc.mean()
                         acc_slot = acc_slot.mean(0)
 
-                # FIXME：
-                #  Joint accuracy is calculated as the average correct turns over all turns. So we should first calculate the correct
-                #  sum and then calculate average instead of calculate the average accuracy for all batches.
                 num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()  # valid turns for all current batch
                 # dev_loss += loss.item() * num_valid_turn
                 dev_acc += acc.item() * num_valid_turn
@@ -984,17 +999,6 @@ def main():
         logger.info(f'Loading saved model from {os.path.join(args.output_dir, state_name)}')
         output_model_file = os.path.join(args.output_dir, state_name)
 
-        # if args.local_rank != -1:
-        #     try:
-        #         from apex.parallel import DistributedDataParallel as DDP
-        #     except ImportError:
-        #         raise ImportError(
-        #             "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-        #
-        #     model = DDP(model)
-        # elif n_gpu > 1:
-        #     model = torch.nn.DataParallel(model)
-
         # in the case that slot and values are different between the training and evaluation
         ptr_model = torch.load(output_model_file)
         # Initialize slot value look up to avoid mismatch
@@ -1045,9 +1049,12 @@ def main():
             eval_loss_slot, eval_acc_slot = None, None
             nb_eval_steps, nb_eval_examples = 0, 0
 
-            accuracies = {'joint5': 0, 'slot5': 0, 'joint_rest': 0, 'slot_rest': 0,
-                          'num_turn': 0, 'num_slot7': 0, 'num_slot5': 0, 'num_slot_rest': 0,
-                          'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0}
+            accuracies = {'joint5': 0, 'slot5': 0, 'num_slot5': 0, 'num_turn': 0,
+                          'joint_rest': 0, 'slot_rest': 0, 'num_slot_rest': 0,
+                          'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0,
+                          'joint_hotel': 0, 'slot_hotel': 0, 'num_slot_hotel': 0,
+                          'joint_attraction': 0, 'slot_attraction': 0, 'num_slot_attraction': 0,
+                          'joint_train': 0, 'slot_train': 0, 'num_slot_train': 0}
 
             for input_ids, token_type_ids, input_mask, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
                 input_ids = input_ids.to(device)
@@ -1123,15 +1130,25 @@ def main():
             out_file_name = f'eval_all_accuracies_{state_name}'
             with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
                 f.write(
-                    'joint acc (5 domain): slot acc (5 domain): joint restaurant : slot acc restaurant : joint taxi : slot acc taxi \n')
-                f.write('%.5f : %.5f : %.5f : %.5f : %.5f : %.5f \n' % (
-                    (accuracies['joint5'] / accuracies['num_turn']).item(),
-                    (accuracies['slot5'] / accuracies['num_slot5']).item(),
-                    (accuracies['joint_rest'] / accuracies['num_turn']).item(),
-                    (accuracies['slot_rest'] / accuracies['num_slot_rest']).item(),
-                    (accuracies['joint_taxi'] / accuracies['num_turn']).item(),
-                    (accuracies['slot_taxi'] / accuracies['num_slot_taxi']).item()
-                ))
+                    'joint acc (5 domain) : %.5f \t slot acc (5 domain) : %.5f \n'
+                    'joint restaurant : %.5f \t slot acc restaurant : %.5f \n'
+                    'joint taxi : %.5f \t slot acc taxi : %.5f \n'
+                    'joint hotel : %.5f \t slot acc hotel : %.5f \n'
+                    'joint attraction : %.5f \t slot acc attraction : %.5f \n'
+                    'joint train : %.5f \t slot acc train %.5f \n' % (
+                        (accuracies['joint5'] / accuracies['num_turn']).item(),
+                        (accuracies['slot5'] / accuracies['num_slot5']).item(),
+                        (accuracies['joint_rest'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_rest'] / accuracies['num_slot_rest']).item(),
+                        (accuracies['joint_taxi'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_taxi'] / accuracies['num_slot_taxi']).item(),
+                        (accuracies['joint_hotel'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_hotel'] / accuracies['num_slot_hotel']).item(),
+                        (accuracies['joint_attraction'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_attraction'] / accuracies['num_slot_attraction']).item(),
+                        (accuracies['joint_train'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_train'] / accuracies['num_slot_train']).item()
+                    ))
 
 
 def eval_all_accs(pred_slot, labels, accuracies):
@@ -1158,6 +1175,27 @@ def eval_all_accs(pred_slot, labels, accuracies):
     accuracies['joint_taxi'] += joint_acc
     accuracies['slot_taxi'] += slot_acc
     accuracies['num_slot_taxi'] += num_data
+
+    # attraction
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 0:3], labels[:, :, 0:3])
+    accuracies['joint_attraction'] += joint_acc
+    accuracies['slot_attraction'] += slot_acc
+    accuracies['num_slot_attraction'] += num_data
+
+    # hotel
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 3:13], labels[:, :, 3:13])
+    accuracies['joint_hotel'] += joint_acc
+    accuracies['slot_hotel'] += slot_acc
+    accuracies['num_slot_hotel'] += num_data
+
+    # train
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 24:], labels[:, :, 24:])
+    accuracies['joint_train'] += joint_acc
+    accuracies['slot_train'] += slot_acc
+    accuracies['num_slot_train'] += num_data
+
+    pred_slot5 = torch.cat((pred_slot[:, :, 0:3], pred_slot[:, :, 8:]), 2)
+    label_slot5 = torch.cat((labels[:, :, 0:3], labels[:, :, 8:]), 2)
 
     # 5 domains (excluding bus and hotel domain)
     joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot, labels)
