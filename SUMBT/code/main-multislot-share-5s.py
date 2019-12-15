@@ -358,6 +358,31 @@ def get_label_embedding(labels, max_seq_length, tokenizer, device):
     return all_label_token_ids, all_label_len
 
 
+def get_slot_embedding(slots, max_seq_length, tokenizer, device):
+    all_input_ids, all_token_type_ids = [], []
+    for domain_slot_pair in slots:
+        pairs = domain_slot_pair.split('-')
+        assert len(pairs) == 2, pairs
+        domain, slot = pairs[0], pairs[1]
+        domain_tokens = tokenizer.tokenize(domain)
+        assert len(domain_tokens) == 1, domain_tokens
+        slot_tokens = ["[CLS]"] + domain_tokens + ["[SEP]"] + tokenizer.tokenize(slot) + ["[SEP]"]
+        slot_token_ids = tokenizer.convert_tokens_to_ids(slot_tokens)
+        token_type_ids = [0] * (len(domain_tokens) + 2) + [1] * (len(slot_tokens) - len(domain_tokens) - 2)
+        assert len(token_type_ids) == len(slot_token_ids), (token_type_ids, slot_token_ids)
+
+        while len(slot_token_ids) < max_seq_length:
+            slot_token_ids.append(0)
+            token_type_ids.append(0)
+        assert len(slot_token_ids) == len(token_type_ids) == max_seq_length
+
+        all_input_ids.append(slot_token_ids)
+        all_token_type_ids.append(token_type_ids)
+    all_input_ids = torch.tensor(all_input_ids, dtype=torch.long, device=device)
+    all_token_type_ids = torch.tensor(all_token_type_ids, dtype=torch.long, device=device)
+    return all_input_ids, all_token_type_ids
+
+
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
     """Truncates a sequence pair in place to the maximum length."""
 
@@ -735,8 +760,8 @@ def main():
     elif args.nbt == 'extend_new':
         logger.info("This model uses a new extended attention module")
         from BeliefTrackerShareSA_double_attn1 import BeliefTracker
-    elif args.nbt == 'sa_cache_type':
-        from BeliefTrackerShareSA_cache_type import BeliefTracker
+    elif args.nbt == 'sa_cache':
+        from BeliefTrackerShareSA_cache import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -760,11 +785,13 @@ def main():
         label_len.append(lens)
 
     ## Get domain-slot-type embeddings
-    slot_token_ids, slot_len = \
-        get_label_embedding(processor.target_slot, args.max_slot_length, tokenizer, device)
+    # slot_token_ids, slot_len = \
+    #     get_label_embedding(processor.target_slot, args.max_slot_length, tokenizer, device)
+    slot_token_ids, slot_token_type_ids = \
+        get_slot_embedding(processor.target_slot, args.max_slot_length, tokenizer, device)
 
     ## Initialize slot and value embeddings
-    model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
+    model.initialize_slot_value_lookup(label_token_ids, slot_token_ids, slot_token_type_ids)
 
     # Prepare optimizer
     if args.do_train:

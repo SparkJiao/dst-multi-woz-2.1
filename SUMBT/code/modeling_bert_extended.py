@@ -200,6 +200,9 @@ class BertReshapeAttention(nn.Module):
         self.extra_key = self.key
         self.extra_value = self.value
 
+    def from_scratch(self):
+        pass
+
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
@@ -253,7 +256,7 @@ class BertReshapeAttention(nn.Module):
         if attn_cache is not None:
             """
             :cache_key: (bs, num_head, seq_len, h)
-            :cache_value: (slot_dim * bs, seq_len, h)
+            :cache_value: (bs, num_head, seq_len, h)
             :query_layer: (slot_dim * bs, num_head, slot_len, h)
             :value_layer: (bs, num_head, seq_len + slot_len, h)
             :attention_mask: (slot_dim * bs, 1, 1, seq_len + slot_len)
@@ -276,7 +279,7 @@ class BertReshapeAttention(nn.Module):
             cache_scores = torch.matmul(query_layer, cache_key.transpose(-1, -2))  # (bs, num_head, slot_dim * slot_len, seq_len)
 
             extra_scores = []
-            if self.key_type in [1, 2, 3]:
+            if self.key_type != 0:
                 assert slot_unified_mask.size() == (slot_dim * bs, 1, 1, total_len)
                 # (bs, num_head, slot_dim * slot_len, h)
                 ini_mask = attention_mask.view(slot_dim, bs, 1, 1, seq_len + slot_len)[0, :, :, :, :seq_len]
@@ -296,7 +299,7 @@ class BertReshapeAttention(nn.Module):
                     if self.key_type == 5:
                         seq_att_value = seq_att_value.detach()
                     seq_att_value_new_key = self.transpose_for_scores(self.extra_key(self.back_transpose_for_scores(seq_att_value)))
-                    seq_value_scores = query_layer.matmul(seq_att_value_new_key)
+                    seq_value_scores = query_layer.matmul(seq_att_value_new_key.transpose(-1, -2))
                     seq_att_value = self.transpose_for_scores(self.extra_value(self.back_transpose_for_scores(seq_att_value)))
                 else:
                     raise RuntimeError("Wrong key type !", self.key_type)
