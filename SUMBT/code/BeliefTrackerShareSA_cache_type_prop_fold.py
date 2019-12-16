@@ -20,15 +20,14 @@ logger = get_child_logger(__name__)
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
-    def __init__(self, config, reduce_layers: int = 0, key_type: int = 0, self_attention_type: int = 0):
+    def __init__(self, config, reduce_layers: int = 0, self_attention_type: int = 0):
         super(BertForUtteranceEncoding, self).__init__(config)
         logger.info(f'Reduce {reduce_layers} of BERT.')
-        logger.info(f'Use key type: {key_type}')
         logger.info(f'Use Self Attention Type: {self_attention_type}')
         config.num_hidden_layers = config.num_hidden_layers - reduce_layers
         config.slot_attention_type = -1
         config.self_attention_type = self_attention_type
-        config.key_type = key_type
+        config.key_type = 0
         self.config = config
         self.bert = BertModel(config)
 
@@ -56,13 +55,10 @@ class BeliefTracker(nn.Module):
 
         # Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(
-            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers,
-            self_attention_type=args.self_attention_type, key_type=args.key_type
+            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'),
+            reduce_layers=args.reduce_layers,
+            self_attention_type=args.self_attention_type
         )
-        logger.info(f"BertReshapeSelfAttention extra key and value initialization type: {args.share_type}")
-        if args.key_type in [4, 5]:
-            for layer in self.utterance_encoder.bert.encoder.layer:
-                getattr(layer.attention.self, args.share_type)()
 
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
@@ -102,7 +98,7 @@ class BeliefTracker(nn.Module):
         # Measure
         self.distance_metric = args.distance_metric
         if self.distance_metric == "cosine":
-            self.metric = torch.nn.CosineSimilarity(dim=-1, eps=1e-06)  # 1e-08 -> 1e-06 to use half ? not sure
+            self.metric = torch.nn.CosineSimilarity(dim=-1, eps=1e-08)
         elif self.distance_metric == "euclidean":
             self.metric = torch.nn.PairwiseDistance(p=2.0, eps=1e-06, keepdim=False)
         elif self.distance_metric == 'product':
@@ -126,7 +122,7 @@ class BeliefTracker(nn.Module):
         slot_len = (slot_len % 2 != 0)
         # [0, 1] in dialog utterance, in cache, type id starts from 0
         flat_slot_type_ids = slot_len.to(dtype=torch.long).unsqueeze(1).expand(-1, slot_ids.size(1))
-        fold_slot_type_ids = slot_ids.new_zeros(slot_ids.size()).fill_((slot_dim % 2 != 0))
+        fold_slot_type_ids = 1 - flat_slot_type_ids
 
         self.register_buffer("slot_ids", slot_ids)
         self.register_buffer("slot_token_type_ids", slot_token_type_ids)
@@ -183,25 +179,32 @@ class BeliefTracker(nn.Module):
                                                       output_all_encoded_layers=False)
 
         # Domain-slot slot_cache
-        slot_ids = self.slot_ids.view(1, slot_dim * self.max_slot_length)
-        slot_mask_cache = self.slot_mask.view(1, slot_dim * self.max_slot_length).to(dtype=attention_mask.dtype)
+        slot_ids = self.slot_ids.view(1, slot_dim * self.max_slot_length).expand(bs, -1)
+        slot_mask_cache = self.slot_mask.view(1, slot_dim * self.max_slot_length).expand(bs, -1).to(dtype=attention_mask.dtype)
+        slot_mask_cache = torch.cat([attention_mask.view(-1, self.max_seq_length), slot_mask_cache], dim=1)
         # slot_type_ids = self.slot_token_type_ids.view(1, slot_dim * self.max_slot_length)
-        slot_type_ids = self.flat_slot_type_ids.view(1, slot_dim * self.max_slot_length)
+        slot_type_ids = self.flat_slot_type_ids.view(1, slot_dim * self.max_slot_length).expand(bs, -1)
         _, _, slot_attn_cache = self.utterance_encoder(slot_ids, token_type_ids=slot_type_ids, attention_mask=slot_mask_cache,
-                                                       output_all_encoded_layers=False, start_offset=self.max_seq_length)
+                                                       output_all_encoded_layers=False, start_offset=self.max_seq_length,
+                                                       all_attn_cache=all_attn_cache)
 
-        for layer_idx, attn_cache_seq in enumerate(slot_attn_cache):
-            for k in attn_cache_seq.keys():
-                all_attn_cache[layer_idx][k] = torch.cat([
-                    all_attn_cache[layer_idx][k],
-                    slot_attn_cache[layer_idx][k].expand(bs, -1, -1, -1)], dim=-2)
+        for layer_idx, attn_cache_seq in enumerate(all_attn_cache):
+            # (bs, num_head, slot_dim * slot_len, h) -> (slot_dim * bs, num_head, slot_len, h)
+            attn_cache_slot = {}
+            num_head = attn_cache_seq[0]["key"].size(1)
+            for k in attn_cache_seq[0]:
+                attn_cache_slot[k] = slot_attn_cache[layer_idx][0][k].reshape(
+                    bs, num_head, slot_dim, self.max_slot_length, self.bert_output_dim // num_head).permute(2, 0, 1, 3, 4).reshape(
+                    slot_dim * bs, num_head, self.max_slot_length, self.bert_output_dim // num_head)
+            attn_cache_seq.append(attn_cache_slot)
 
         # Domain-slot encoding
         slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
         slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+        # total_len = self.max_slot_length * slot_dim + self.max_seq_length
         slot_mask = torch.cat(
             [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
-             slot_mask_cache.unsqueeze(0).expand(slot_dim, bs, -1).reshape(-1, slot_dim * self.max_slot_length),
+             slot_mask.to(dtype=attention_mask.dtype),
              slot_mask.to(dtype=attention_mask.dtype)], dim=-1)
         slot_type_ids = self.fold_slot_type_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
 
@@ -223,16 +226,16 @@ class BeliefTracker(nn.Module):
             hid_label = self.value_lookup[slot_id].weight
             num_slot_labels = hid_label.size(0)
 
-            # if self.distance_metric == 'product':
-            _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
-            _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
-            _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
-            # else:
-            #     _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels,
-            #                                                                                -1)
-            #     _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
-            #         ds * ts * num_slot_labels, -1)
-            #     _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
+            if self.distance_metric == 'product':
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
+                _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
+                _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
+            else:
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels,
+                                                                                           -1)
+                _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
+                    ds * ts * num_slot_labels, -1)
+                _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
 
             if self.distance_metric == "euclidean":
                 _dist = -_dist

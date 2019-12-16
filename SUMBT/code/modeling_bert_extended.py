@@ -28,8 +28,10 @@ from pytorch_pretrained_bert.modeling import BertConfig
 from torch import nn
 
 # from .file_utils import cached_path
-
-from global_logger import get_child_logger
+try:
+    from .global_logger import get_child_logger
+except ImportError:
+    from global_logger import get_child_logger
 
 logger = get_child_logger(__name__)
 
@@ -352,6 +354,129 @@ class BertReshapeAttention(nn.Module):
         return context_layer, new_attn_cache
 
 
+class BertCacheAttention(nn.Module):
+    def __init__(self, config):
+        super(BertCacheAttention, self).__init__()
+        if config.hidden_size % config.num_attention_heads != 0:
+            raise ValueError(
+                "The hidden size (%d) is not a multiple of the number of attention "
+                "heads (%d)" % (config.hidden_size, config.num_attention_heads))
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def back_transpose_for_scores(self, x):
+        x = x.permute(0, 2, 1, 3).contiguous()
+        new_x_shape = x.size()[:-2] + (self.all_head_size,)
+        return x.view(*new_x_shape)
+
+    def transpose_for_slot(self, x, slot_dim):
+        full_size, num_head, seq_len, h = x.size()  # (num_head, seq_len, h) / (num_head, len1, len2)
+        assert num_head in [self.num_attention_heads, 1]
+        bs = full_size // slot_dim
+        new_shape = (slot_dim, bs, num_head, seq_len, h)
+        x = x.view(*new_shape).permute(1, 2, 0, 3, 4)
+        new_shape = (bs, num_head, slot_dim * seq_len, h)
+        return x.reshape(*new_shape)
+
+    @staticmethod
+    def back_transpose_for_slot(x, slot_dim):
+        bs, num_head, total_len, h = x.size()  # (bs, num_head, slot_dim * len1, len2 / h)
+        seq_len = total_len // slot_dim
+        new_shape = (bs, num_head, slot_dim, seq_len, h)
+        x = x.view(*new_shape).permute(2, 0, 1, 3, 4)
+        new_shape = (slot_dim * bs, num_head, seq_len, h)
+        return x.reshape(*new_shape)
+
+    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0):
+        mixed_query_layer = self.query(hidden_states)
+        mixed_key_layer = self.key(hidden_states)
+        mixed_value_layer = self.value(hidden_states)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        new_attn_cache = [{
+            "key": key_layer,
+            "value": value_layer
+        }]
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        cache_scores = []
+        cache_scores_if_tf = []
+        if attn_cache is not None and attn_cache != []:
+
+            # slot_tf_query = self.transpose_for_slot(query_layer, slot_dim)
+            for cache in attn_cache:
+                cache_key = cache["key"]
+                if cache_key.size(0) != query_layer.size(0):
+                    # slot attention
+                    # query: (slot_dim * bs, num_head, len1, h)
+                    # key & value: (bs, num_head, len2, h)
+                    slot_tf_query = self.transpose_for_slot(query_layer, slot_dim)
+                    # (bs, num_head, slot_dim * len1, len2)
+                    tf_scores = torch.matmul(slot_tf_query, cache_key.transpose(-1, -2))
+                    # (slot_dim * bs, num_head, len1, len2)
+                    cache_scores.append(self.back_transpose_for_slot(tf_scores, slot_dim))
+                    cache_scores_if_tf.append(1)
+                else:
+                    # equal size attention
+                    # query & key & value: (slot_dim * bs, num_head, len1, len2, h)
+                    # logger.warning("reach here")
+                    # logger.warn(cache_key.size())
+                    # logger.warn(query_layer.size())
+                    cache_scores.append(query_layer.matmul(cache_key.transpose(-1, -2)))
+                    cache_scores_if_tf.append(0)
+
+        if cache_scores:
+            attention_scores = torch.cat(cache_scores + [attention_scores], dim=-1)
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores = attention_scores + attention_mask  # the size of mask should be expand before forward.
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)  # (slot_dim * bs, num_head, len1, \sum len2)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        start_len = 0
+        init_prob = attention_probs[:, :, :, -key_layer.size(-2):]
+        context_layer = torch.matmul(init_prob, value_layer)
+        for cache_idx, cache_score in enumerate(cache_scores):
+            end_len = start_len + cache_score.size(-1)
+            cache_prob = attention_probs[:, :, :, start_len:end_len]  # ((slot_dim *) bs, num_head, len1, len2)
+            start_len += cache_score.size(-1)
+            if cache_scores_if_tf[cache_idx] == 0:
+                cache_context = cache_prob.matmul(attn_cache[cache_idx]["value"])
+                context_layer = context_layer + cache_context
+            else:
+                tf_cache_prob = self.transpose_for_slot(cache_prob, slot_dim)
+                cache_context = tf_cache_prob.matmul(attn_cache[cache_idx]["value"])
+                context_layer = context_layer + self.back_transpose_for_slot(cache_context, slot_dim)
+        assert start_len == attention_scores.size(-1) - key_layer.size(-2)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+        return context_layer, new_attn_cache
+
+
 class BertAttention(nn.Module):
     def __init__(self, config):
         super(BertAttention, self).__init__()
@@ -359,6 +484,8 @@ class BertAttention(nn.Module):
             self.self = BertSelfAttention(config)
         elif config.self_attention_type == 1:
             self.self = BertReshapeAttention(config)
+        elif config.self_attention_type == 2:
+            self.self = BertCacheAttention(config)
         else:
             raise RuntimeError()
         logger.info(f"Use {self.self.__class__.__name__} as self attention module of BERT")
