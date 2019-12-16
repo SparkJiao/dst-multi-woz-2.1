@@ -737,6 +737,8 @@ def main():
         from BeliefTrackerShareSA_double_attn1 import BeliefTracker
     elif args.nbt == 'sa_cache_type':
         from BeliefTrackerShareSA_cache_type import BeliefTracker
+    elif args.nbt == 'ini_sa_cache_flat':
+        from BeliefTrackerShareSA_init_cache_flat import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

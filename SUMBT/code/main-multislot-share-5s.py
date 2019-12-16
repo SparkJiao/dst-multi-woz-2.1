@@ -1048,7 +1048,7 @@ def main():
             model.module.load_state_dict(ptr_model)
 
         model.to(device)
-        model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
+        model.initialize_slot_value_lookup(label_token_ids, slot_token_ids, slot_token_type_ids)
 
         if args.fp16:
             try:
