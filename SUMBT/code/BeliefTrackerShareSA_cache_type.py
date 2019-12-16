@@ -223,16 +223,16 @@ class BeliefTracker(nn.Module):
             hid_label = self.value_lookup[slot_id].weight
             num_slot_labels = hid_label.size(0)
 
-            # if self.distance_metric == 'product':
-            _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
-            _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
-            _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
-            # else:
-            #     _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels,
-            #                                                                                -1)
-            #     _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
-            #         ds * ts * num_slot_labels, -1)
-            #     _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
+            if self.distance_metric == 'product':
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
+                _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
+                _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
+            else:
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels,
+                                                                                           -1)
+                _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
+                    ds * ts * num_slot_labels, -1)
+                _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
 
             if self.distance_metric == "euclidean":
                 _dist = -_dist
