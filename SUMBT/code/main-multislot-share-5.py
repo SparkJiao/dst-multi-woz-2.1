@@ -1231,6 +1231,8 @@ def get_predictions(pred_slots, labels, processor: Processor):
     for i in range(ds):
         dialog_pred = []
         for j in range(ts):
+            if labels[i][j][0] == -1:
+                break
             for slot_idx in range(slot_dim):
                 slot = processor.target_slot[slot_idx]
                 pred_label = processor.ontology[slot][pred_slots[i][j][slot_idx]]
