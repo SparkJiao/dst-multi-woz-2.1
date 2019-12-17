@@ -107,6 +107,8 @@ class BeliefTracker(nn.Module):
             self.metric = torch.nn.PairwiseDistance(p=2.0, eps=1e-06, keepdim=False)
         elif self.distance_metric == 'product':
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
+        elif self.distance_metric == 'mlp':
+            self.metric = nn.Linear(self.bert_output_dim * 3, 1)
 
         # Classifier
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
@@ -227,6 +229,10 @@ class BeliefTracker(nn.Module):
                 _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
                 _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
                 _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
+            elif self.distance_metric == 'mlp':
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
+                _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(ds * ts * num_slot_labels, -1)
+                _dist = self.metric(torch.cat([_hid_label, _hidden, _hid_label - _hidden], dim=1)).view(ds, ts, num_slot_labels)
             else:
                 _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels,
                                                                                            -1)

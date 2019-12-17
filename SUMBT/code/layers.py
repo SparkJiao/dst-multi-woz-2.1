@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from allennlp.nn.util import masked_log_softmax
+from torch.nn import HingeEmbeddingLoss
 
 
 class ProductSimilarity(nn.Module):
@@ -11,6 +12,33 @@ class ProductSimilarity(nn.Module):
     def forward(self, x1, x2):
         return x1.bmm(x2.transpose(1, 2))
 
+
+class MultiClassHingeLoss(nn.Module):
+    def __init__(self, margin, ignore_index=-1):
+        super(MultiClassHingeLoss, self).__init__()
+        self.margin = margin
+        self.ignore_index = ignore_index
+
+    def forward(self, x, target, do_mean: bool = False):
+        """
+        x: (batch, *, C)
+        target: (batch, *)
+        """
+        x = x.to(dtype=torch.float)  # avoid half precision
+        assert target.size() == x.size()[:-1]
+        ignore_mask = (target == -1)
+        target.masked_fill_(ignore_mask, 0)
+        target_score = x.gather(index=target.unsqueeze(-1), dim=-1)
+        target_mask = F.one_hot(target, num_classes=x.size(-1)).to(dtype=torch.uint8)
+        masked_target = x.masked_fill(target_mask, -40000.0)
+        second_max, _ = masked_target.max(dim=-1)
+        loss = self.margin - target_score + second_max
+        loss[loss < 0] = 0
+        loss[ignore_mask] = 0
+        loss = loss.sum()
+        if do_mean:
+            loss = loss / x.size(0)
+        return loss
 
 
 # ===============================

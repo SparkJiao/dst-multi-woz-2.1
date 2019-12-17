@@ -105,6 +105,10 @@ class BeliefTracker(nn.Module):
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         # Classifier
+        # if args.distance_metric == 'cosine':
+        #     logger.info("Use hinge loss to enlarge cosine distance")
+        #     self.nll = layers.MultiClassHingeLoss(margin=0.5, ignore_index=-1)
+        # else:
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
 
         # Etc.
@@ -233,6 +237,8 @@ class BeliefTracker(nn.Module):
                 _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
                     ds * ts * num_slot_labels, -1)
                 _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
+                # if self.distance_metric == 'cosine':
+                #     logger.warn(_dist.detach().cpu().tolist())
 
             if self.distance_metric == "euclidean":
                 _dist = -_dist
@@ -248,6 +254,7 @@ class BeliefTracker(nn.Module):
                 _loss = self.nll(_dist.view(ds * ts, -1), masked_slot_labels_for_loss.view(-1)) / (ds * 1.0)
                 loss_slot.append(_loss.item())
                 loss += _loss
+                # logger.info(f"Loss: {_loss.item()}")
 
         if labels is None:
             return output

@@ -5,7 +5,6 @@ import logging
 import os
 import random
 import time
-import json
 
 import numpy as np
 import torch
@@ -411,6 +410,65 @@ def make_aux_tensors(ids, len):
     return token_type_ids, attention_mask
 
 
+def evaluate(model, dev_dataloader, args):
+    model.eval()
+    dev_loss = 0
+    dev_acc = 0
+    dev_loss_slot, dev_acc_slot = None, None
+    nb_dev_examples, nb_dev_steps = 0, 0
+
+    for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
+        batch = tuple(t.to(args.device) for t in batch)
+        input_ids, token_type_ids, input_mask, label_ids = batch
+        batch_size = input_ids.size(0)
+        if input_ids.dim() == 2:
+            input_ids = input_ids.unsqueeze(0)
+            token_type_ids = token_type_ids.unsqueeze(0)
+            input_mask = input_mask.unsqueeze(0)
+            label_ids = label_ids.unsuqeeze(0)
+
+        with torch.no_grad():
+            if args.n_gpu == 1:
+                loss, loss_slot, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, args.n_gpu)
+            else:
+                loss, _, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, args.n_gpu)
+
+                # average to multi-gpus
+                loss = loss.mean()
+                acc = acc.mean()
+                acc_slot = acc_slot.mean(0)
+
+        num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()  # valid turns for all current batch
+        # dev_loss += loss.item() * num_valid_turn
+        dev_acc += acc.item() * num_valid_turn
+        dev_loss += loss.item() * batch_size
+        # dev_acc += acc.item()
+
+        if args.n_gpu == 1:
+            if dev_loss_slot is None:
+                # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
+                dev_acc_slot = acc_slot * num_valid_turn
+                dev_loss_slot = [l * batch_size for l in loss_slot]
+                # dev_acc_slot = acc_slot
+            else:
+                for i, l in enumerate(loss_slot):
+                    # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
+                    dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
+                dev_acc_slot += acc_slot * num_valid_turn
+                # dev_acc_slot += acc_slot
+
+        nb_dev_examples += num_valid_turn
+
+    # dev_loss = dev_loss / nb_dev_examples
+    dev_loss = dev_loss / len(dev_dataloader)
+    dev_acc = dev_acc / nb_dev_examples
+
+    if args.n_gpu == 1:
+        dev_acc_slot = dev_acc_slot / nb_dev_examples
+
+    return dev_loss, dev_acc, dev_loss_slot, dev_acc_slot,
+
+
 def main():
     """
     This script fix the undefined values in ontology. Please search "FIX_UNDEFINED" to find the difference with `main-multislot.py`
@@ -587,6 +645,7 @@ def main():
     parser.add_argument('--share_type', type=str, default='full_share', help="full_share, share_weight, copy_weight")
     parser.add_argument('--key_type', type=int, default=0)
     parser.add_argument('--self_attention_type', type=int, default=0)
+    parser.add_argument('--per_eval_steps', type=int, default=3000)
 
     args = parser.parse_args()
 
@@ -633,6 +692,8 @@ def main():
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
             args.gradient_accumulation_steps))
 
+    args.device = device
+    args.n_gpu = n_gpu
     args.train_batch_size = int(args.train_batch_size / args.gradient_accumulation_steps)
 
     # Set random seed
@@ -833,12 +894,13 @@ def main():
 
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             # Train
-            model.train()
             tr_loss = 0
             nb_tr_examples = 0
             nb_tr_steps = 0
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
+                model.train()
+
                 batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
                 input_ids, token_type_ids, input_mask, label_ids = batch
 
@@ -868,8 +930,6 @@ def main():
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    # modify lealrning rate with special warm up BERT uses
-                    # lr_this_step = args.learning_rate * warmup_linear(global_step / t_total, args.warmup_proportion)
                     lr_this_step = optimizer.get_lr()[0]
                     if summary_writer is not None:
                         summary_writer.add_scalar("Epoch", epoch, global_step)
@@ -882,122 +942,74 @@ def main():
                                                           global_step)
                                 summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
                                                           global_step)
-                    # for param_group in optimizer.param_groups:
-                    #     param_group['lr'] = lr_this_step
 
                     optimizer.step()
                     optimizer.zero_grad()
                     global_step += 1
 
-            # Perform evaluation on validation dataset
-            model.eval()
-            dev_loss = 0
-            dev_acc = 0
-            dev_loss_slot, dev_acc_slot = None, None
-            nb_dev_examples, nb_dev_steps = 0, 0
+                    if global_step % args.per_eval_steps == 0:
 
-            for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
-                batch = tuple(t.to(device) for t in batch)
-                input_ids, token_type_ids, input_mask, label_ids = batch
-                batch_size = input_ids.size(0)
-                if input_ids.dim() == 2:
-                    input_ids = input_ids.unsqueeze(0)
-                    token_type_ids = token_type_ids.unsqueeze(0)
-                    input_mask = input_mask.unsqueeze(0)
-                    label_ids = label_ids.unsuqeeze(0)
+                        dev_loss, dev_acc, dev_loss_slot, dev_acc_slot = evaluate(model, dev_dataloader, args)
 
-                with torch.no_grad():
-                    if n_gpu == 1:
-                        loss, loss_slot, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
-                    else:
-                        loss, _, acc, acc_slot, _ = model(input_ids, token_type_ids, input_mask, label_ids, n_gpu)
+                        if summary_writer is not None:
+                            summary_writer.add_scalar("Validate/Loss", dev_loss, global_step)
+                            summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
+                            if n_gpu == 1:
+                                for i, slot in enumerate(processor.target_slot):
+                                    summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
+                                                              dev_loss_slot[i] / len(dev_dataloader), global_step)
 
-                        # average to multi-gpus
-                        loss = loss.mean()
-                        acc = acc.mean()
-                        acc_slot = acc_slot.mean(0)
+                                    summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'),
+                                                              dev_acc_slot[i], global_step)
 
-                num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()  # valid turns for all current batch
-                # dev_loss += loss.item() * num_valid_turn
-                dev_acc += acc.item() * num_valid_turn
-                dev_loss += loss.item() * batch_size
-                # dev_acc += acc.item()
+                        dev_loss = round(dev_loss, 6)
+                        # if last_update is None or dev_loss < best_loss:
+                        if last_update is None or dev_acc > best_acc:
+                            # Save a trained model
+                            output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
+                            if args.do_train:
+                                if n_gpu == 1:
+                                    torch.save(model.state_dict(), output_model_file)
+                                else:
+                                    torch.save(model.module.state_dict(), output_model_file)
 
-                if n_gpu == 1:
-                    if dev_loss_slot is None:
-                        # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
-                        dev_acc_slot = acc_slot * num_valid_turn
-                        dev_loss_slot = [l * batch_size for l in loss_slot]
-                        # dev_acc_slot = acc_slot
-                    else:
-                        for i, l in enumerate(loss_slot):
-                            # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
-                            dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
-                        dev_acc_slot += acc_slot * num_valid_turn
-                        # dev_acc_slot += acc_slot
+                            last_update = global_step
+                            # best_loss = dev_loss
+                            best_acc = dev_acc
 
-                nb_dev_examples += num_valid_turn
+                            logger.info(
+                                "*** Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
+                                    last_update, dev_loss, best_acc))
+                        else:
+                            logger.info(
+                                "*** Model NOT Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
+                                    global_step, dev_loss, dev_acc))
 
-            # dev_loss = dev_loss / nb_dev_examples
-            dev_loss = dev_loss / len(dev_dataloader)
-            dev_acc = dev_acc / nb_dev_examples
+                        if last_loss_update is None or dev_loss < best_loss:
+                            # Save a trained model
+                            output_model_file = os.path.join(args.output_dir, "pytorch_model_loss.bin")
+                            if args.do_train:
+                                if n_gpu == 1:
+                                    torch.save(model.state_dict(), output_model_file)
+                                else:
+                                    torch.save(model.module.state_dict(), output_model_file)
 
-            if n_gpu == 1:
-                dev_acc_slot = dev_acc_slot / nb_dev_examples
+                            last_loss_update = global_step
+                            best_loss = dev_loss
+                            # best_acc = dev_acc
 
-            # tensorboard logging
-            if summary_writer is not None:
-                summary_writer.add_scalar("Validate/Loss", dev_loss, global_step)
-                summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
-                if n_gpu == 1:
-                    for i, slot in enumerate(processor.target_slot):
-                        summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'), dev_loss_slot[i] / len(dev_dataloader),
-                                                  global_step)
-                        summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i], global_step)
+                            logger.info(
+                                "*** Lowest Loss Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
+                                    last_loss_update, best_loss, dev_acc))
+                        else:
+                            logger.info(
+                                "*** Lowest Loss Model NOT Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
+                                    global_step, dev_loss, dev_acc))
 
-            dev_loss = round(dev_loss, 6)
-            # if last_update is None or dev_loss < best_loss:
-            if last_update is None or dev_acc > best_acc:
-                # Save a trained model
-                output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
-                if args.do_train:
-                    if n_gpu == 1:
-                        torch.save(model.state_dict(), output_model_file)
-                    else:
-                        torch.save(model.module.state_dict(), output_model_file)
+                        if last_update + args.patience * args.per_eval_steps <= global_step:
+                            break
 
-                last_update = epoch
-                # best_loss = dev_loss
-                best_acc = dev_acc
-
-                logger.info(
-                    "*** Model Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (last_update, dev_loss, best_acc))
-            else:
-                logger.info(
-                    "*** Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (epoch, dev_loss, dev_acc))
-
-            if last_loss_update is None or dev_loss < best_loss:
-                # Save a trained model
-                output_model_file = os.path.join(args.output_dir, "pytorch_model_loss.bin")
-                if args.do_train:
-                    if n_gpu == 1:
-                        torch.save(model.state_dict(), output_model_file)
-                    else:
-                        torch.save(model.module.state_dict(), output_model_file)
-
-                last_loss_update = epoch
-                best_loss = dev_loss
-                # best_acc = dev_acc
-
-                logger.info(
-                    "*** Lowest Loss Model Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
-                        last_loss_update, best_loss, dev_acc))
-            else:
-                logger.info(
-                    "*** Lowest Loss Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
-                        epoch, dev_loss, dev_acc))
-
-            if last_update + args.patience <= epoch:
+            if last_update + args.patience * args.per_eval_steps <= global_step:
                 break
 
     ###############################################################################
@@ -1067,7 +1079,6 @@ def main():
                           'joint_hotel': 0, 'slot_hotel': 0, 'num_slot_hotel': 0,
                           'joint_attraction': 0, 'slot_attraction': 0, 'num_slot_attraction': 0,
                           'joint_train': 0, 'slot_train': 0, 'num_slot_train': 0}
-            predictions = []
 
             for input_ids, token_type_ids, input_mask, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
                 input_ids = input_ids.to(device)
@@ -1090,7 +1101,6 @@ def main():
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
 
                 accuracies = eval_all_accs(pred_slot, label_ids, accuracies)
-                predictions.extend(get_predictions(pred_slot, label_ids, processor))
 
                 nb_eval_ex = (label_ids[:, :, 0].view(-1) != -1).sum().item()
                 nb_eval_examples += nb_eval_ex
@@ -1140,9 +1150,6 @@ def main():
                 for key in sorted(result.keys()):
                     logger.info("  %s = %s", key, str(result[key]))
                     writer.write("%s = %s\n" % (key, str(result[key])))
-
-            with open(os.path.join(args.output_dir, f"predictions_{state_name}.json"), 'w') as f:
-                json.dump(predictions, f, indent=2)
 
             out_file_name = f'eval_all_accuracies_{state_name}'
             with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
@@ -1221,28 +1228,6 @@ def eval_all_accs(pred_slot, labels, accuracies):
     accuracies['num_slot5'] += num_data
 
     return accuracies
-
-
-def get_predictions(pred_slots, labels, processor: Processor):
-    predictions = []
-    ds = pred_slots.size(0)
-    ts = pred_slots.size(1)
-    slot_dim = pred_slots.size(-1)
-    for i in range(ds):
-        dialog_pred = []
-        for j in range(ts):
-            for slot_idx in range(slot_dim):
-                slot = processor.target_slot[slot_idx]
-                pred_label = processor.ontology[slot][pred_slots[i][j][slot_idx]]
-                gold_label = processor.ontology[slot][labels[i][j][slot_idx]]
-                dialog_pred.append({
-                    "turn": j,
-                    "slot": slot,
-                    "predict_value": pred_label,
-                    "gold_label": gold_label
-                })
-        predictions.append(dialog_pred)
-    return predictions
 
 
 if __name__ == "__main__":
