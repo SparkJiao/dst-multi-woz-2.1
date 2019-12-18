@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #output_dir=exp-multiwoz/data2.1-cls-cache-type-prop/v1.0
-output_dir=exp-multiwoz/data2.1-cls-cache-type-prop/v1.1-restaurant  # cls_type 0 -> 1
+output_dir=exp-multiwoz/data2.0-cls-cache-type-prop/v1.1-restaurant  # cls_type 0 -> 1
 target_slot='restaurant'
 nbt='sa_cache_type_prop'
 bert_dir='/home/jiaofangkai/'
 
-python code/main-multislot-share-5-newcls.py --do_train --do_eval --num_train_epochs 6 --data_dir data/multiwoz2.1_5 \
+python code/main-multislot-share-cls.py --do_train --do_eval --num_train_epochs 6 --data_dir data/multiwoz2.0 \
 --bert_model bert-base-uncased --do_lower_case --bert_dir $bert_dir --task_name bert-gru-sumbt \
 --nbt $nbt --output_dir $output_dir --target_slot $target_slot --warmup_proportion 0.1 --learning_rate 5e-5 \
 --train_batch_size 1 --eval_batch_size 1 --distance_metric product --patience 5 \
@@ -14,15 +14,11 @@ python code/main-multislot-share-5-newcls.py --do_train --do_eval --num_train_ep
 --fp16 --fp16_opt_level O2 --gradient_accumulation_steps 1 \
 --reduce_layers 0 --max_label_length 20 --max_slot_length 6 \
 --override_attn --share_position_weight --self_attention_type 2 \
---train_file data/multiwoz2.1_5/train-5-full-value.tsv \
---dev_file data/multiwoz2.1_5/dev-5-full-value.tsv \
---test_file data/multiwoz2.1_5/test-5-full-value.tsv \
---ontology data/multiwoz2.1_5/ontology-full.json \
 --cls_type 1
 
 
 target_slot='all'
-python code/main-multislot-share-5-newcls.py --do_eval --num_train_epochs 6 --data_dir data/multiwoz2.1_5 \
+python code/main-multislot-share-cls.py --do_eval --num_train_epochs 6 --data_dir data/multiwoz2.0 \
 --bert_model bert-base-uncased --do_lower_case --bert_dir $bert_dir --task_name bert-gru-sumbt \
 --nbt $nbt --output_dir $output_dir --target_slot $target_slot --warmup_proportion 0.1 --learning_rate 5e-5 \
 --train_batch_size 1 --eval_batch_size 1 --distance_metric product --patience 5 \
@@ -30,8 +26,4 @@ python code/main-multislot-share-5-newcls.py --do_eval --num_train_epochs 6 --da
 --fp16 --fp16_opt_level O2 --gradient_accumulation_steps 1 \
 --reduce_layers 0 --max_label_length 20 --max_slot_length 6 \
 --override_attn --share_position_weight --self_attention_type 2 \
---train_file data/multiwoz2.1_5/train-5-full-value.tsv \
---dev_file data/multiwoz2.1_5/dev-5-full-value.tsv \
---test_file data/multiwoz2.1_5/test-5-full-value.tsv \
---ontology data/multiwoz2.1_5/ontology-full.json \
 --cls_type 1
