@@ -1,7 +1,6 @@
 import argparse
 import collections
 import csv
-import json
 import logging
 import os
 import random
@@ -107,13 +106,8 @@ class Processor(DataProcessor):
             fp_ontology.close()
 
         # MultiWOZ dataset
-        elif config.data_dir == "data/multiwoz2.1_5":
-
-            if config.ontology is None:
-                fp_ontology = open(os.path.join(config.data_dir, "ontology.json"), "r")
-            else:
-                fp_ontology = open(config.ontology, "r")
-
+        elif config.data_dir == "data/multiwoz" or config.data_dir == "data/multiwoz2.0" or config.data_dir == 'data/multiwoz2.1':
+            fp_ontology = open(os.path.join(config.data_dir, "ontology.json"), "r")
             ontology = json.load(fp_ontology)
             for slot in ontology.keys():
                 # ontology[slot].append("none")
@@ -125,8 +119,8 @@ class Processor(DataProcessor):
             fp_ontology.close()
 
             if not config.target_slot == 'all':
-                slot_idx = {'attraction': '0:1:2', 'hotel': '3:4:5:6:7:8:9:10:11:12',
-                            'restaurant': '13:14:15:16:17:18:19', 'taxi': '20:21:22:23', 'train': '24:25:26:27:28:29'}
+                slot_idx = {'attraction': '0:1:2', 'bus': '3:4:5:6', 'hospital': '7', 'hotel': '8:9:10:11:12:13:14:15:16:17', \
+                            'restaurant': '18:19:20:21:22:23:24', 'taxi': '25:26:27:28', 'train': '29:30:31:32:33:34'}
                 target_slot = []
                 for key, value in slot_idx.items():
                     if key != config.target_slot:
@@ -160,29 +154,20 @@ class Processor(DataProcessor):
         logger.info('Processor: target_slot')
         logger.info(self.target_slot)
 
-    def get_train_examples(self, data_dir, accumulation=False, train_file=None):
+    def get_train_examples(self, data_dir, accumulation=False):
         """See base class."""
-        if train_file is None:
-            return self._create_examples(
-                self._read_tsv(os.path.join(data_dir, "train-5.tsv")), "train", accumulation)
-        else:
-            return self._create_examples(self._read_tsv(train_file), "train", accumulation)
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, "train-f.tsv")), "train", accumulation)
 
-    def get_dev_examples(self, data_dir, accumulation=False, dev_file=None):
+    def get_dev_examples(self, data_dir, accumulation=False):
         """See base class."""
-        if dev_file is None:
-            return self._create_examples(
-                self._read_tsv(os.path.join(data_dir, "dev-5.tsv")), "dev", accumulation)
-        else:
-            return self._create_examples(self._read_tsv(dev_file), "dev", accumulation)
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, "dev-f.tsv")), "dev", accumulation)
 
-    def get_test_examples(self, data_dir, accumulation=False, test_file=None):
+    def get_test_examples(self, data_dir, accumulation=False):
         """See base class."""
-        if test_file is None:
-            return self._create_examples(
-                self._read_tsv(os.path.join(data_dir, "test-5.tsv")), "test", accumulation)
-        else:
-            return self._create_examples(self._read_tsv(test_file), "test", accumulation)
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, "test-f.tsv")), "test", accumulation)
 
     def get_labels(self):
         """See base class."""
@@ -464,10 +449,6 @@ def main():
                         type=str,
                         required=True,
                         help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
-    parser.add_argument("--train_file", default=None, type=str)
-    parser.add_argument("--dev_file", default=None, type=str)
-    parser.add_argument("--test_file", default=None, type=str)
-    parser.add_argument("--ontology", default=None, type=str)
     parser.add_argument("--bert_model", default='bert-base-uncased', type=str, required=True,
                         help="Bert pre-trained model selected in the list: bert-base-uncased, "
                              "bert-large-uncased, bert-base-cased, bert-large-cased, bert-base-multilingual-uncased, "
@@ -618,6 +599,7 @@ def main():
     parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--across_slot', default=False, action='store_true')
     parser.add_argument('--override_attn', default=False, action='store_true')
+    parser.add_argument('--transpose_layer', default=-1, type=int)
     parser.add_argument('--share_position_weight', default=False, action='store_true')
     parser.add_argument('--slot_attention_type', default=-1, type=int)
     parser.add_argument('--share_type', type=str, default='full_share', help="full_share, share_weight, copy_weight")
@@ -703,8 +685,8 @@ def main():
     accumulation = False
 
     if args.do_train:
-        train_examples = processor.get_train_examples(args.data_dir, accumulation=accumulation, train_file=args.train_file)
-        dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation, dev_file=args.dev_file)
+        train_examples = processor.get_train_examples(args.data_dir, accumulation=accumulation)
+        dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation)
 
         ## Training utterances
         all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
@@ -765,19 +747,39 @@ def main():
     elif args.nbt == 'sa':
         logger.info("Use simple self-attention as neural belief tracker")
         from BeliefTrackerShareSA import BeliefTracker
-    elif args.nbt == 'bert':
-        logger.info("Initialize transformer dialog encoder from pre-trained BERT")
-        from BeliefTrackerShareBert import BeliefTracker
+    elif args.nbt == 'test':
+        logger.info("Test belief tracker")
+        from BeliefTrackerShareSA_for_test import BeliefTracker
+    elif args.nbt == 'transpose':
+        logger.info("Use self-attention neural belief tracker but bert layer is transposed.")
+        from BeliefTrackerShareSA_transpose import BeliefTracker
+    elif args.nbt == 'slot':
+        logger.info("Use self-attention neural belief tracker and add slot attention in bert")
+        from BeliefTrackerShareSA_slot import BeliefTracker
+    elif args.nbt == 'dialog':
+        logger.info("Use dialog attention composed in BERT as neural belief trakcer")
+        from BeliefTrackerShareDialog import BeliefTracker
+    elif args.nbt == 'flat_slot':
+        logger.info("Use self-attention neural belief trakcer and flat slot attention in bert")
+        from BeliefTrackerShareSA_flat_slot import BeliefTracker
+    elif args.nbt == 'all_slot':
+        logger.info("Use self-attention neural belief tracker and all slot attended into attention")
+        from BeliefTrackerShareSA_all_slot import BeliefTracker
+    elif args.nbt == 'flat_test':
+        logger.info("This is a test for flat slot attention with unified attention mask.")
+        from BeliefTrackerShareSA_flat_test import BeliefTracker
+    elif args.nbt == 'extend':
+        logger.info("This model uses a extended attention module")
+        from BeliefTrackerShareSA_double_attn import BeliefTracker
+    elif args.nbt == 'extend_float':
+        logger.info("This model uses a extended attention module with float softmax")
+        from BeliefTrackerShareSA_double_attn_float import BeliefTracker
     elif args.nbt == 'flat_test1':
         logger.info("This is another test for flat slot attention but self attention mask.")
-        from BeliefTrackerShareSA_flat_test1_cls import BeliefTracker
+        from BeliefTrackerShareSA_flat_test1 import BeliefTracker
     elif args.nbt == 'extend_new':
         logger.info("This model uses a new extended attention module")
-        from BeliefTrackerShareSA_double_attn1_cls import BeliefTracker
-    elif args.nbt == 'sa_cache_type':
-        from BeliefTrackerShareSA_cache_type import BeliefTracker
-    elif args.nbt == 'ini_sa_cache_flat':
-        from BeliefTrackerShareSA_init_cache_flat import BeliefTracker
+        from BeliefTrackerShareSA_double_attn1 import BeliefTracker
     elif args.nbt == 'sa_cache_type_prop':
         from BeliefTrackerShareSA_cache_type_prop_cls import BeliefTracker
     elif args.nbt == 'sa_cache_type_prop_fold':
@@ -911,6 +913,7 @@ def main():
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     # modify lealrning rate with special warm up BERT uses
+                    # lr_this_step = args.learning_rate * warmup_linear(global_step / t_total, args.warmup_proportion)
                     lr_this_step = optimizer.get_lr()[0]
                     if summary_writer is not None:
                         summary_writer.add_scalar("Epoch", epoch, global_step)
@@ -923,6 +926,8 @@ def main():
                                                           global_step)
                                 summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
                                                           global_step)
+                    # for param_group in optimizer.param_groups:
+                    #     param_group['lr'] = lr_this_step
 
                     optimizer.step()
                     optimizer.zero_grad()
@@ -1111,7 +1116,8 @@ def main():
             eval_loss_slot, eval_acc_slot = None, None
             nb_eval_steps, nb_eval_examples = 0, 0
 
-            accuracies = {'joint5': 0, 'joint_type5': 0, 'slot5': 0, 'slot_type5': 0, 'num_slot5': 0, 'num_turn': 0,
+            accuracies = {'joint7': 0, 'joint_type7': 0, 'slot7': 0, 'slot_type7': 0, 'num_slot7': 0,
+                          'joint5': 0, 'joint_type5': 0, 'slot5': 0, 'slot_type5': 0, 'num_slot5': 0, 'num_turn': 0,
                           'joint_rest': 0, 'joint_type_rest': 0, 'slot_rest': 0, 'slot_type_rest': 0, 'num_slot_rest': 0,
                           'joint_taxi': 0, 'joint_type_taxi': 0, 'slot_taxi': 0, 'slot_type_taxi': 0, 'num_slot_taxi': 0,
                           'joint_hotel': 0, 'joint_type_hotel': 0, 'slot_hotel': 0, 'slot_type_hotel': 0, 'num_slot_hotel': 0,
@@ -1202,6 +1208,9 @@ def main():
             out_file_name = f'eval_all_accuracies_{state_name}'
             with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
                 f.write(
+                    'joint acc (7 domain) : %.5f \t slot acc (7 domain) : %.5f \n'
+                    'joint acc type (7 domain) : %.5f \t slot acc type (7 domain) : %.5f \n'
+
                     'joint acc (5 domain) : %.5f \t slot acc (5 domain) : %.5f \n'
                     'joint acc type (5 domain) : %.5f \t slot acc type (5 domain) : %.5f \n'
 
@@ -1219,6 +1228,11 @@ def main():
 
                     'joint train : %.5f \t slot acc train %.5f \n'
                     'joint train type : %.5f \t slot acc train type %.5f \n' % (
+                        (accuracies['joint7'] / accuracies['num_turn']).item(),
+                        (accuracies['slot7'] / accuracies['num_slot7']).item(),
+                        (accuracies['joint_type7'] / accuracies['num_turn']).item(),
+                        (accuracies['slot_type7'] / accuracies['num_slot7']).item(),
+
                         (accuracies['joint5'] / accuracies['num_turn']).item(),
                         (accuracies['slot5'] / accuracies['num_slot5']).item(),
                         (accuracies['joint_type5'] / accuracies['num_turn']).item(),
@@ -1272,10 +1286,19 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
         slot_acc_type = torch.sum(answer_type_accuracy).float()
         return joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data
 
+    # 7 domains
+    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
+        answer_type_pred, pred_slot, answer_type_ids, labels)
+    accuracies['joint7'] += joint_acc
+    accuracies['joint_type7'] += joint_acc_type
+    accuracies['slot7'] += slot_acc
+    accuracies['slot_type7'] += slot_acc_type
+    accuracies['num_turn'] += num_turn
+    accuracies['num_slot7'] += num_data
+
     # restaurant domain
     joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 13:20], pred_slot[:, :, 13:20], answer_type_ids[:, :, 13:20], labels[:, :, 13:20])
-    accuracies['num_turn'] += num_turn
+        answer_type_pred[:, :, 18:25], pred_slot[:, :, 18:25], answer_type_ids[:, :, 18:25], labels[:, :, 18:25])
     accuracies['joint_rest'] += joint_acc
     accuracies['joint_type_rest'] += joint_acc_type
     accuracies['slot_rest'] += slot_acc
@@ -1284,7 +1307,7 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
 
     # taxi domain
     joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 20:24], pred_slot[:, :, 20:24], answer_type_ids[:, :, 20:24], labels[:, :, 20:24])
+        answer_type_pred[:, :, 25:29], pred_slot[:, :, 25:29], answer_type_ids[:, :, 25:29], labels[:, :, 25:29])
     accuracies['joint_taxi'] += joint_acc
     accuracies['joint_type_taxi'] += joint_acc_type
     accuracies['slot_taxi'] += slot_acc
@@ -1302,7 +1325,7 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
 
     # hotel
     joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 3:13], pred_slot[:, :, 3:13], answer_type_ids[:, :, 3:13], labels[:, :, 3:13])
+        answer_type_pred[:, :, 8:18], pred_slot[:, :, 8:18], answer_type_ids[:, :, 8:18], labels[:, :, 8:18])
     accuracies['joint_hotel'] += joint_acc
     accuracies['joint_type_hotel'] += joint_acc_type
     accuracies['slot_hotel'] += slot_acc
@@ -1311,16 +1334,21 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
 
     # train
     joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 24:], pred_slot[:, :, 24:], answer_type_ids[:, :, 24:], labels[:, :, 24:])
+        answer_type_pred[:, :, 29:], pred_slot[:, :, 29:], answer_type_ids[:, :, 29:], labels[:, :, 29:])
     accuracies['joint_train'] += joint_acc
     accuracies['joint_type_train'] += joint_acc_type
     accuracies['slot_train'] += slot_acc
     accuracies['slot_type_train'] += slot_acc_type
     accuracies['num_slot_train'] += num_data
 
+    pred_slot5 = torch.cat((pred_slot[:, :, 0:3], pred_slot[:, :, 8:]), 2)
+    answer_type_pred5 = torch.cat((answer_type_pred[:, :, 0:3], answer_type_pred[:, :, 8:]), 2)
+    label_slot5 = torch.cat((labels[:, :, 0:3], labels[:, :, 8:]), 2)
+    answer_type_ids5 = torch.cat((answer_type_ids[:, :, 0:3], answer_type_ids[:, :, 8:]), 2)
+
     # 5 domains (excluding bus and hotel domain)
     joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred, pred_slot, answer_type_ids, labels)
+        answer_type_pred5, pred_slot5, answer_type_ids5, label_slot5)
     accuracies['joint5'] += joint_acc
     accuracies['joint_type5'] += joint_acc_type
     accuracies['slot5'] += slot_acc

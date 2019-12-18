@@ -112,11 +112,7 @@ class BeliefTracker(nn.Module):
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         # Classifier
-        if args.distance_metric == 'cosine':
-            logger.info("Use hinge loss to enlarge cosine distance")
-            self.nll = layers.MultiClassHingeLoss(margin=0.5, ignore_index=-1)
-        else:
-            self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
+        self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
@@ -133,7 +129,7 @@ class BeliefTracker(nn.Module):
         slot_len = (slot_len % 2 != 0)
         # [0, 1] in dialog utterance, in cache, type id starts from 0
         flat_slot_type_ids = slot_len.to(dtype=torch.long).unsqueeze(1).expand(-1, slot_ids.size(1))
-        fold_slot_type_ids = slot_ids.new_zeros(slot_ids.size()).fill_((slot_dim % 2 != 0))
+        fold_slot_type_ids = 1 - flat_slot_type_ids
 
         self.register_buffer("slot_ids", slot_ids)
         self.register_buffer("slot_token_type_ids", slot_token_type_ids)
@@ -199,21 +195,23 @@ class BeliefTracker(nn.Module):
                                                        output_all_encoded_layers=False, start_offset=self.max_seq_length,
                                                        all_attn_cache=all_attn_cache)
 
-        # for layer_idx, attn_cache_seq in enumerate(slot_attn_cache):
-        #     for k in attn_cache_seq.keys():
-        #         all_attn_cache[layer_idx][k] = torch.cat([
-        #             all_attn_cache[layer_idx][k],
-        #             slot_attn_cache[layer_idx][k].expand(bs, -1, -1, -1)], dim=-2)
         for layer_idx, attn_cache_seq in enumerate(all_attn_cache):
-            attn_cache_seq.extend(slot_attn_cache[layer_idx])
-            assert len(all_attn_cache[layer_idx]) == 2
+            # (bs, num_head, slot_dim * slot_len, h) -> (slot_dim * bs, num_head, slot_len, h)
+            attn_cache_slot = {}
+            num_head = attn_cache_seq[0]["key"].size(1)
+            for k in attn_cache_seq[0]:
+                attn_cache_slot[k] = slot_attn_cache[layer_idx][0][k].reshape(
+                    bs, num_head, slot_dim, self.max_slot_length, self.bert_output_dim // num_head).permute(2, 0, 1, 3, 4).reshape(
+                    slot_dim * bs, num_head, self.max_slot_length, self.bert_output_dim // num_head)
+            attn_cache_seq.append(attn_cache_slot)
 
         # Domain-slot encoding
         slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
         slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
-        total_len = self.max_slot_length * slot_dim + self.max_seq_length
+        # total_len = self.max_slot_length * slot_dim + self.max_seq_length
         slot_mask = torch.cat(
-            [slot_mask_cache.unsqueeze(0).expand(slot_dim, -1, -1).reshape(slot_dim * bs, total_len),
+            [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
+             slot_mask.to(dtype=attention_mask.dtype),
              slot_mask.to(dtype=attention_mask.dtype)], dim=-1)
         slot_type_ids = self.fold_slot_type_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
 
@@ -243,12 +241,11 @@ class BeliefTracker(nn.Module):
                 _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
                 _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
             else:
-                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
+                _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels,
+                                                                                           -1)
                 _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
                     ds * ts * num_slot_labels, -1)
                 _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
-                # if self.distance_metric == 'cosine':
-                #     logger.warn(_dist.detach().cpu().tolist())
 
             if self.distance_metric == "euclidean":
                 _dist = -_dist
@@ -302,7 +299,7 @@ class BeliefTracker(nn.Module):
         else:
             return loss.unsqueeze(0), None, acc.unsqueeze(0), type_acc.unusqueeze(0), acc_slot.unsqueeze(0), \
                    type_acc_slot.unsqueeze(0), torch.cat([
-                answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1).unsqueeze(0)
+                    answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1).unsqueeze(0)
 
     @staticmethod
     def init_parameter(module):

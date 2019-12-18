@@ -78,6 +78,8 @@ class BeliefTracker(nn.Module):
 
         self.value_lookup = nn.ModuleList([nn.Embedding(num_label, self.bert_output_dim) for num_label in num_labels])
 
+        self.combine_project = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+
         # NBT
         nbt_config = self.sv_encoder.config
         nbt_config.num_attention_heads = self.attn_head
@@ -195,15 +197,13 @@ class BeliefTracker(nn.Module):
         slot_mask_cache = torch.cat([attention_mask.view(-1, self.max_seq_length), slot_mask_cache], dim=1)
         # slot_type_ids = self.slot_token_type_ids.view(1, slot_dim * self.max_slot_length)
         slot_type_ids = self.flat_slot_type_ids.view(1, slot_dim * self.max_slot_length).expand(bs, -1)
-        _, _, slot_attn_cache = self.utterance_encoder(slot_ids, token_type_ids=slot_type_ids, attention_mask=slot_mask_cache,
-                                                       output_all_encoded_layers=False, start_offset=self.max_seq_length,
-                                                       all_attn_cache=all_attn_cache)
+        slot_hidden, _, slot_attn_cache = self.utterance_encoder(slot_ids, token_type_ids=slot_type_ids,
+                                                                 attention_mask=slot_mask_cache,
+                                                                 output_all_encoded_layers=False, start_offset=self.max_seq_length,
+                                                                 all_attn_cache=all_attn_cache)
+        slot_hidden = slot_hidden.view(bs, slot_dim, self.max_slot_length, -1)
+        slot_hidden = slot_hidden[:, :, 0].transpose(0, 1).reshape(slot_dim * ds, ts, self.bert_output_dim)
 
-        # for layer_idx, attn_cache_seq in enumerate(slot_attn_cache):
-        #     for k in attn_cache_seq.keys():
-        #         all_attn_cache[layer_idx][k] = torch.cat([
-        #             all_attn_cache[layer_idx][k],
-        #             slot_attn_cache[layer_idx][k].expand(bs, -1, -1, -1)], dim=-2)
         for layer_idx, attn_cache_seq in enumerate(all_attn_cache):
             attn_cache_seq.extend(slot_attn_cache[layer_idx])
             assert len(all_attn_cache[layer_idx]) == 2
@@ -221,6 +221,8 @@ class BeliefTracker(nn.Module):
                                               output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
                                               start_offset=self.max_seq_length + slot_dim * self.max_slot_length, slot_dim=slot_dim)
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
+
+        hidden = self.combine_project(torch.cat([slot_hidden, hidden], dim=-1))
 
         # NBT
         hidden = self.transformer(hidden, None).view(slot_dim, ds, ts, -1)
