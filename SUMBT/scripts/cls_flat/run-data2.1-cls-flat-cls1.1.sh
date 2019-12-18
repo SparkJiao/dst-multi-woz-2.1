@@ -1,6 +1,7 @@
 #!/bin/bash
 
-output_dir=exp-multiwoz/data2.1-cls-sa-flat/v1.0
+#output_dir=exp-multiwoz/data2.1-cls-sa-flat/v1.0
+output_dir=exp-multiwoz/data2.1-cls-sa-flat/v1.1  # cls_type 0 -> 1
 target_slot='all'
 nbt='flat_test1'
 bert_dir='/home/jiaofangkai/'
@@ -17,3 +18,4 @@ python code/main-multislot-share-5-newcls.py --do_eval --num_train_epochs 6 --da
 --dev_file data/multiwoz2.1_5/dev-5-full-value.tsv \
 --test_file data/multiwoz2.1_5/test-5-full-value.tsv \
 --ontology data/multiwoz2.1_5/ontology-full.json \
+--cls_type 1

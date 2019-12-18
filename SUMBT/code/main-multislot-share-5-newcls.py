@@ -623,6 +623,7 @@ def main():
     parser.add_argument('--share_type', type=str, default='full_share', help="full_share, share_weight, copy_weight")
     parser.add_argument('--key_type', type=int, default=0)
     parser.add_argument('--self_attention_type', type=int, default=0)
+    parser.add_argument('--cls_type', default=0, type=int)
 
     args = parser.parse_args()
 
@@ -777,7 +778,7 @@ def main():
     elif args.nbt == 'ini_sa_cache_flat':
         from BeliefTrackerShareSA_init_cache_flat import BeliefTracker
     elif args.nbt == 'sa_cache_type_prop':
-        from BeliefTrackerShareSA_cache_type_prop import BeliefTracker
+        from BeliefTrackerShareSA_cache_type_prop_cls import BeliefTracker
     elif args.nbt == 'sa_cache_type_prop_fold':
         from BeliefTrackerShareSA_cache_type_prop_fold import BeliefTracker
     else:
@@ -1133,8 +1134,8 @@ def main():
                         nslot = pred_slot.size(3)
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
 
-                accuracies = eval_all_accs(pred_slot, label_ids, accuracies)
-                predictions.extend(get_predictions(pred_slot, label_ids, processor))
+                accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
+                predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor))
 
                 nb_eval_ex = (answer_type_ids[:, :, 0].view(-1) != -1).sum().item()
                 nb_eval_examples += nb_eval_ex
@@ -1258,7 +1259,7 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
         joint_acc_type = sum(torch.sum(answer_type_accuracy, dim=1) // slot_dim).float()
         # slot accuracy
         slot_acc = torch.sum(accuracy).float()
-        slot_acc_type = torch.sum(answer_type_accuracy, dim=1).float()
+        slot_acc_type = torch.sum(answer_type_accuracy).float()
         return joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data
 
     # restaurant domain
@@ -1313,7 +1314,10 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
     return accuracies
 
 
-def get_predictions(pred_slots, labels, processor: Processor):
+def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor):
+    answer_type_pred = pred_slots[:, :, :, 0]
+    pred_slots = pred_slots[:, :, :, 1]
+    type_vocab = ['none', 'do not care', 'value']
     predictions = []
     ds = pred_slots.size(0)
     ts = pred_slots.size(1)
@@ -1323,13 +1327,17 @@ def get_predictions(pred_slots, labels, processor: Processor):
         for j in range(ts):
             for slot_idx in range(slot_dim):
                 slot = processor.target_slot[slot_idx]
-                pred_label = processor.ontology[slot][pred_slots[i][j][slot_idx]]
-                gold_label = processor.ontology[slot][labels[i][j][slot_idx]]
+                pred_answer_type = type_vocab[answer_type_pred[i, j, slot_idx]]
+                gold_answer_type = type_vocab[answer_type_ids[i, j, slot_idx]]
+                pred_label = -1 if pred_slots[i, j, slot_idx] == -1 else processor.ontology[slot][pred_slots[i][j][slot_idx]]
+                gold_label = -1 if pred_slots[i, j, slot_idx] == -1 else processor.ontology[slot][labels[i][j][slot_idx]]
                 dialog_pred.append({
                     "turn": j,
                     "slot": slot,
                     "predict_value": pred_label,
-                    "gold_label": gold_label
+                    "gold_label": gold_label,
+                    "pred_answer_type": pred_answer_type,
+                    "gold_answer_type": gold_answer_type
                 })
         predictions.append(dialog_pred)
     return predictions
