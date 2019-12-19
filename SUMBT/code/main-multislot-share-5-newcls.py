@@ -624,6 +624,9 @@ def main():
     parser.add_argument('--key_type', type=int, default=0)
     parser.add_argument('--self_attention_type', type=int, default=0)
     parser.add_argument('--cls_type', default=0, type=int)
+    parser.add_argument('--mask_self', default=False, action='store_true')
+    parser.add_argument('--remove_some_slot', default=False, action='store_true')
+    parser.add_argument('--extra_dropout', type=float, default=-1.)
 
     args = parser.parse_args()
 
@@ -780,10 +783,18 @@ def main():
         from BeliefTrackerShareSA_init_cache_flat import BeliefTracker
     elif args.nbt == 'sa_cache_type_prop':
         from BeliefTrackerShareSA_cache_type_prop_cls import BeliefTracker
+    elif args.nbt == 'sa_cache_type_prop_2':
+        from BeliefTrackerShareSA_cache_type_prop_cls2 import BeliefTracker
     elif args.nbt == 'sa_cache_type_prop_fold':
         from BeliefTrackerShareSA_cache_type_prop_fold_cls import BeliefTracker
     elif args.nbt == 'cache_combine':
         from BeliefTrackerShareSA_cls_cb import BeliefTracker
+    elif args.nbt == 'stack':
+        from BeliefTrackerShareSA_stack import BeliefTracker
+    elif args.nbt == 'stack_remove':
+        from BeliefTrackerShareSA_stack_remove import BeliefTracker
+    elif args.nbt == 'stack_ex':
+        from BeliefTrackerShareSA_stack_ex import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

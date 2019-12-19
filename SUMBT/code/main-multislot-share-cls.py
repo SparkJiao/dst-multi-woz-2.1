@@ -1,6 +1,7 @@
 import argparse
 import collections
 import csv
+import json
 import logging
 import os
 import random
@@ -776,7 +777,7 @@ def main():
         from BeliefTrackerShareSA_double_attn_float import BeliefTracker
     elif args.nbt == 'flat_test1':
         logger.info("This is another test for flat slot attention but self attention mask.")
-        from BeliefTrackerShareSA_flat_test1 import BeliefTracker
+        from BeliefTrackerShareSA_flat_test1_cls import BeliefTracker
     elif args.nbt == 'extend_new':
         logger.info("This model uses a new extended attention module")
         from BeliefTrackerShareSA_double_attn1 import BeliefTracker
@@ -1095,7 +1096,7 @@ def main():
         # Evaluation
         if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 
-            eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation, test_file=args.test_file)
+            eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation)
             all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
             all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
@@ -1126,7 +1127,8 @@ def main():
                           'joint_train': 0, 'joint_type_train': 0, 'slot_train': 0, 'slot_type_train': 0, 'num_slot_train': 0}
             predictions = []
 
-            for input_ids, token_type_ids, input_mask, answer_type_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
+            for input_ids, token_type_ids, input_mask, answer_type_ids, label_ids in tqdm(eval_dataloader,
+                                                                                          desc="Evaluating", dynamic_ncols=True):
                 input_ids = input_ids.to(device)
                 token_type_ids = token_type_ids.to(device)
                 input_mask = input_mask.to(device)

@@ -28,8 +28,9 @@ class MultiClassHingeLoss(nn.Module):
         assert target.size() == x.size()[:-1]
         ignore_mask = (target == -1)
         target.masked_fill_(ignore_mask, 0)
-        target_score = x.gather(index=target.unsqueeze(-1), dim=-1)
+        # target_score = torch.gather(x, dim=-1, index=target.unsqueeze(-1))
         target_mask = F.one_hot(target, num_classes=x.size(-1)).to(dtype=torch.uint8)
+        target_score = x.masked_fill(1 - target_mask, 0).sum(dim=-1)
         masked_target = x.masked_fill(target_mask, -40000.0)
         second_max, _ = masked_target.max(dim=-1)
         loss = self.margin - target_score + second_max

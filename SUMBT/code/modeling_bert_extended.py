@@ -399,7 +399,7 @@ class BertCacheAttention(nn.Module):
         new_shape = (slot_dim * bs, num_head, seq_len, h)
         return x.reshape(*new_shape)
 
-    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0):
+    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0, extra_dropout=-1):
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
@@ -461,6 +461,8 @@ class BertCacheAttention(nn.Module):
         for cache_idx, cache_score in enumerate(cache_scores):
             end_len = start_len + cache_score.size(-1)
             cache_prob = attention_probs[:, :, :, start_len:end_len]  # ((slot_dim *) bs, num_head, len1, len2)
+            if cache_idx == 0 and extra_dropout > 0 and self.training:
+                cache_prob = nn.functional.dropout(cache_prob, p=extra_dropout, training=self.training)
             start_len += cache_score.size(-1)
             if cache_scores_if_tf[cache_idx] == 0:
                 cache_context = cache_prob.matmul(attn_cache[cache_idx]["value"])

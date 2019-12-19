@@ -1,9 +1,8 @@
-import math
+import logging
 import os.path
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 from torch.nn import CrossEntropyLoss
 
@@ -16,18 +15,18 @@ except ImportError:
     from modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from global_logger import get_child_logger
 
-logger = get_child_logger(__name__)
+logger: logging.Logger = get_child_logger(__name__)
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config, reduce_layers: int = 0, self_attention_type: int = 0):
         super(BertForUtteranceEncoding, self).__init__(config)
-        logger.info(f'Reduce {reduce_layers} of BERT.')
-        logger.info(f'Use Self Attention Type: {self_attention_type}')
+        print(f'Reduce {reduce_layers} of BERT.')
+        print(f'Self Attention Type: {self_attention_type}')
         config.num_hidden_layers = config.num_hidden_layers - reduce_layers
         config.slot_attention_type = -1
-        config.self_attention_type = self_attention_type
         config.key_type = 0
+        config.self_attention_type = self_attention_type
         self.config = config
         self.bert = BertModel(config)
 
@@ -55,11 +54,9 @@ class BeliefTracker(nn.Module):
 
         # Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(
-            os.path.join(args.bert_dir, f'{args.bert_model}.tar.gz'),
-            reduce_layers=args.reduce_layers,
+            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'), reduce_layers=args.reduce_layers,
             self_attention_type=args.self_attention_type
         )
-
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
         if args.fix_utterance_encoder:
@@ -72,7 +69,7 @@ class BeliefTracker(nn.Module):
 
         # values Encoder (not trainable)
         self.sv_encoder = BertForUtteranceEncoding.from_pretrained(
-            os.path.join(args.bert_dir, f'{args.bert_model}.tar.gz'))
+            os.path.join(args.bert_dir, 'bert-base-uncased.tar.gz'))
         for p in self.sv_encoder.bert.parameters():
             p.requires_grad = False
 
@@ -88,19 +85,33 @@ class BeliefTracker(nn.Module):
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm,
                                                          self_attention=last_attention)
+            self.ass_transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                             add_layer_norm=args.sa_add_layer_norm,
+                                                             self_attention=last_attention)
         else:
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm)
+            self.ass_transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                             add_layer_norm=args.sa_add_layer_norm)
         if args.share_position_weight:
             logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
+            self.ass_transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         if args.cls_type == 0:
+            self.ass_classifier = nn.Linear(self.bert_output_dim, 3)
             self.classifier = nn.Linear(self.bert_output_dim, 3)
         elif args.cls_type == 1:
             self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
                                             nn.Tanh(),
                                             nn.Linear(self.bert_output_dim, 3))
+            self.ass_classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
+                                                nn.Tanh(),
+                                                nn.Linear(self.bert_output_dim, 3))
+
+        self.mask_self = args.mask_self
+        self.remove_some_slot = args.remove_some_slot
+        logger.info(f"Remove some slot: {args.remove_some_slot}")
 
         # Measure
         self.distance_metric = args.distance_metric
@@ -112,11 +123,6 @@ class BeliefTracker(nn.Module):
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         # Classifier
-        # if args.distance_metric == 'cosine':
-        #     # TODO: There is a bug here.
-        #     logger.info("Use hinge loss to enlarge cosine distance")
-        #     self.nll = layers.MultiClassHingeLoss(margin=0.5, ignore_index=-1)
-        # else:
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
 
         # Etc.
@@ -129,17 +135,44 @@ class BeliefTracker(nn.Module):
         # register slot input buffer
         slot_mask = slot_ids > 0
 
-        slot_dim = slot_ids.size(0)
-        slot_len = torch.arange(slot_dim, dtype=torch.long, device=slot_ids.device)
-        slot_len = (slot_len % 2 != 0)
-        # [0, 1] in dialog utterance, in cache, type id starts from 0
-        flat_slot_type_ids = slot_len.to(dtype=torch.long).unsqueeze(1).expand(-1, slot_ids.size(1))
-        fold_slot_type_ids = slot_ids.new_zeros(slot_ids.size()).fill_((slot_dim % 2 != 0))
+        # remove slots containing `name`
+        name_id = 2171
+        slot_dim, max_slot_length = slot_ids.size()
 
+        # (max_slot_length, max_slot_length)
+        slot_diag = torch.diag(torch.ones(slot_ids.size(-1), dtype=torch.long, device=slot_ids.device), diagonal=0)
+        unified_list = []
+        for slot_idx in range(slot_ids.size(0)):
+            if name_id in slot_ids[slot_idx]:
+                unified_list.append(1)
+            else:
+                unified_list.append(0)
+        logger.info(f"Unified list: {unified_list}")
+        # (slot_dim, max_slot_length)
+        slot_unified_mask = torch.tensor(unified_list, dtype=torch.long,
+                                         device=slot_ids.device).unsqueeze(-1).expand(-1, max_slot_length)
+        # (max_slot_length, slot_dim, max_slot_length)
+        slot_unified_mask = slot_unified_mask.unsqueeze(0).expand(max_slot_length, -1, -1) * slot_diag[:, None, :]
+
+        unified_mask = []
+        all_see_mask = slot_ids.new_ones(1, max_slot_length, slot_dim, max_slot_length)
+        for x in unified_list:
+            if x == 1:
+                unified_mask.append(slot_unified_mask.unsqueeze(0))
+            else:
+                unified_mask.append(all_see_mask)
+        # (slot_dim, max_slot_length, slot_dim, max_slot_length)  expand at the second dimension for batch size
+        unified_mask = torch.cat(unified_mask, dim=0).reshape(slot_dim, 1, max_slot_length, slot_dim * max_slot_length)
+        logger.info(f"Unified mask: {unified_mask}")
+
+        # (slot_dim, 1, max_slot_length)  expand at the second dimension for batch size
+        slot_self_mask = 1 - torch.tensor(unified_list, dtype=torch.long, device=slot_ids.device)
+        slot_self_mask = slot_self_mask.unsqueeze(-1).expand(-1, max_slot_length).unsqueeze(1)
+
+        self.register_buffer("unified_mask", unified_mask)
+        self.register_buffer("slot_self_mask", slot_self_mask)
         self.register_buffer("slot_ids", slot_ids)
         self.register_buffer("slot_token_type_ids", slot_token_type_ids)
-        self.register_buffer("flat_slot_type_ids", flat_slot_type_ids.contiguous())
-        self.register_buffer("fold_slot_type_ids", fold_slot_type_ids.contiguous())
         self.register_buffer("slot_mask", slot_mask.to(dtype=torch.long))
 
         with torch.no_grad():
@@ -190,42 +223,53 @@ class BeliefTracker(nn.Module):
                                                       attention_mask.view(-1, self.max_seq_length),
                                                       output_all_encoded_layers=False)
 
-        # Domain-slot slot_cache
-        slot_ids = self.slot_ids.view(1, slot_dim * self.max_slot_length).expand(bs, -1)
-        slot_mask_cache = self.slot_mask.view(1, slot_dim * self.max_slot_length).expand(bs, -1).to(dtype=attention_mask.dtype)
-        slot_mask_cache = torch.cat([attention_mask.view(-1, self.max_seq_length), slot_mask_cache], dim=1)
-        # slot_type_ids = self.slot_token_type_ids.view(1, slot_dim * self.max_slot_length)
-        slot_type_ids = self.flat_slot_type_ids.view(1, slot_dim * self.max_slot_length).expand(bs, -1)
-        _, _, slot_attn_cache = self.utterance_encoder(slot_ids, token_type_ids=slot_type_ids, attention_mask=slot_mask_cache,
-                                                       output_all_encoded_layers=False, start_offset=self.max_seq_length,
-                                                       all_attn_cache=all_attn_cache)
-
-        # for layer_idx, attn_cache_seq in enumerate(slot_attn_cache):
-        #     for k in attn_cache_seq.keys():
-        #         all_attn_cache[layer_idx][k] = torch.cat([
-        #             all_attn_cache[layer_idx][k],
-        #             slot_attn_cache[layer_idx][k].expand(bs, -1, -1, -1)], dim=-2)
-        for layer_idx, attn_cache_seq in enumerate(all_attn_cache):
-            attn_cache_seq.extend(slot_attn_cache[layer_idx])
-            assert len(all_attn_cache[layer_idx]) == 2
-
         # Domain-slot encoding
         slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
-        slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
-        total_len = self.max_slot_length * slot_dim + self.max_seq_length
+        ini_slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
         slot_mask = torch.cat(
-            [slot_mask_cache.unsqueeze(0).expand(slot_dim, -1, -1).reshape(slot_dim * bs, total_len),
-             slot_mask.to(dtype=attention_mask.dtype)], dim=-1)
-        slot_type_ids = self.fold_slot_type_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+            [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
+             ini_slot_mask.to(dtype=attention_mask.dtype)], dim=-1)
 
-        hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=slot_type_ids, attention_mask=slot_mask,
-                                              output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
-                                              start_offset=self.max_seq_length + slot_dim * self.max_slot_length, slot_dim=slot_dim)
+        if self.slot_token_type_ids is not None:
+            slot_token_type_ids = self.slot_token_type_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
+        else:
+            slot_token_type_ids = None
+
+        mid_hidden, _, mid_hidden_cache = self.utterance_encoder(slot_ids, token_type_ids=slot_token_type_ids,
+                                                                 attention_mask=slot_mask,
+                                                                 output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
+                                                                 start_offset=self.max_seq_length, slot_dim=slot_dim)
+        mid_hidden = mid_hidden[:, 0].view(slot_dim * ds, ts, -1)
+
+        for layer_idx, attn_cache in enumerate(mid_hidden_cache):
+            num_head = attn_cache[0]["key"].size(1)
+            new_cache = {}
+            for k, v in attn_cache[0].items():
+                # (slot_dim * bs, num_head, max_slot_length, h // num_head)
+                new_cache[k] = v.view(slot_dim, bs, num_head, self.max_slot_length, -1).permute(
+                    1, 2, 0, 3, 4).reshape(bs, num_head, slot_dim * self.max_slot_length, -1)
+            mid_hidden_cache[layer_idx] = [new_cache]
+
+        slot_cache_mask = self.slot_mask[None, None, :, :].expand(
+            slot_dim, bs, -1, -1).reshape(slot_dim * bs, slot_dim * self.max_slot_length)
+        slot_self_mask = ini_slot_mask
+        if self.remove_some_slot:
+            slot_cache_mask = slot_cache_mask[:, None, :] * self.unified_mask.expand(
+                -1, bs, -1, -1).reshape(slot_dim * bs, self.max_slot_length, slot_dim * self.max_slot_length)
+            slot_self_mask = slot_self_mask * self.slot_self_mask.expand(-1, bs, -1).reshape(slot_dim * bs, self.max_slot_length)
+            slot_self_mask = slot_self_mask.unsqueeze(1).expand(-1, self.max_slot_length, -1)
+        slot_mask = torch.cat([slot_cache_mask, slot_self_mask], dim=-1)
+
+        hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=slot_token_type_ids, attention_mask=slot_mask,
+                                              output_all_encoded_layers=False, all_attn_cache=mid_hidden_cache,
+                                              start_offset=self.max_seq_length + self.max_slot_length, slot_dim=slot_dim)
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
 
         # NBT
+        mid_hidden = self.ass_transformer(mid_hidden, None).view(slot_dim, ds, ts, -1)
         hidden = self.transformer(hidden, None).view(slot_dim, ds, ts, -1)
 
+        answer_type_mid_logits = self.ass_classifier(mid_hidden)
         answer_type_logits = self.classifier(hidden)
         _, answer_type_pred = answer_type_logits.max(dim=-1)
 
@@ -243,16 +287,21 @@ class BeliefTracker(nn.Module):
                 _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
                 _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
                 _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
+
+                _mid_hidden = mid_hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
+                _mid_dist = self.metric(_mid_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
             else:
                 _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
                 _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
                     ds * ts * num_slot_labels, -1)
                 _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
-                # if self.distance_metric == 'cosine':
-                #     logger.warn(_dist.detach().cpu().tolist())
+
+                _mid_hidden = mid_hidden[s].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(ds * ts * num_slot_labels, -1)
+                _mid_dist = self.metric(_hid_label, _mid_hidden).view(ds, ts, num_slot_labels)
 
             if self.distance_metric == "euclidean":
                 _dist = -_dist
+                _mid_dist = -_mid_dist
             _, pred = torch.max(_dist, -1)
             pred_slot.append(pred.view(ds, ts, 1))
             output.append(_dist)
@@ -266,10 +315,18 @@ class BeliefTracker(nn.Module):
                 loss_slot.append(_loss.item())
                 loss += _loss
 
+                _mid_loss = self.nll(_mid_dist.view(ds * ts, -1), masked_slot_labels_for_loss.view(-1)) / ds
+                loss += 0.8 * _mid_loss
+
             if answer_type_ids is not None:
                 cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 loss_slot[-1] += cls_loss.item()
                 loss += cls_loss
+
+        if answer_type_ids is not None:
+            flat_answer_type_ids = answer_type_ids.permute(2, 0, 1).reshape(-1)
+            mid_cls_loss = self.nll(answer_type_mid_logits.view(-1, 3), flat_answer_type_ids) / ds
+            loss += 0.8 * mid_cls_loss
 
         if labels is None:
             return output
@@ -298,11 +355,11 @@ class BeliefTracker(nn.Module):
         # acc = sum(torch.sum(accuracy, 1) / slot_dim).float() / torch.sum(labels[:, :, 0].view(-1) > -1, 0).float()  # joint accuracy
 
         if n_gpu == 1:
-            return loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, torch.cat([
-                answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1)
+            return loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, torch.cat(
+                [answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1)
         else:
-            return loss.unsqueeze(0), None, acc.unsqueeze(0), type_acc.unusqueeze(0), acc_slot.unsqueeze(0), \
-                   type_acc_slot.unsqueeze(0), torch.cat([
+            return loss.unsqueeze(0), None, acc.unsqueeze(0), type_acc.unusqueeze(0), acc_slot.unsqueeze(0), type_acc_slot.unsqueeze(
+                0), torch.cat([
                 answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1).unsqueeze(0)
 
     @staticmethod
