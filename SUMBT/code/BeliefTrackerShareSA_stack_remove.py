@@ -141,6 +141,8 @@ class BeliefTracker(nn.Module):
 
         # (max_slot_length, max_slot_length)
         slot_diag = torch.diag(torch.ones(slot_ids.size(-1), dtype=torch.long, device=slot_ids.device), diagonal=0)
+        # (slot_dim, slot_dim)
+        dim_diag = torch.diag(torch.ones(slot_dim, dtype=torch.long, device=slot_ids.device))
         unified_list = []
         for slot_idx in range(slot_ids.size(0)):
             if name_id in slot_ids[slot_idx]:
@@ -148,16 +150,32 @@ class BeliefTracker(nn.Module):
             else:
                 unified_list.append(0)
         logger.info(f"Unified list: {unified_list}")
+        # (slot_dim, slot_dim, max_slot_length)
+        slot_unified_mask = dim_diag.unsqueeze(-1).expand(-1, -1, max_slot_length)
+
         # (slot_dim, max_slot_length)
         slot_unified_mask = torch.tensor(unified_list, dtype=torch.long,
                                          device=slot_ids.device).unsqueeze(-1).expand(-1, max_slot_length)
         # (max_slot_length, slot_dim, max_slot_length)
+        # TODO: FIX Bug
         slot_unified_mask = slot_unified_mask.unsqueeze(0).expand(max_slot_length, -1, -1) * slot_diag[:, None, :]
+        slot_unified_mask =
 
         unified_mask = []
         all_see_mask = slot_ids.new_ones(1, max_slot_length, slot_dim, max_slot_length)
-        for x in unified_list:
+        for idx, x in enumerate(unified_list):
             if x == 1:
+                if idx > 0:
+                    prefix_mask = [slot_ids.new_zeros(max_slot_length, idx, max_slot_length)]
+                else:
+                    prefix_mask = []
+                if idx < slot_dim - 1:
+                    suffix_mask = [slot_ids.new_zeros(max_slot_length, slot_dim - 1 - idx, max_slot_length)]
+                    unified_mask.append(torch.cat([
+                        slot_ids.new_zeros(max_slot_length, idx, max_slot_length),
+                        slot_diag.unsqueeze(1),
+
+                    ]))
                 unified_mask.append(slot_unified_mask.unsqueeze(0))
             else:
                 unified_mask.append(all_see_mask)
