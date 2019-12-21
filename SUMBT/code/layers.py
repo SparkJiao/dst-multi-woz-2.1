@@ -3,6 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from allennlp.nn.util import masked_log_softmax
 from torch.nn import HingeEmbeddingLoss
+from pytorch_pretrained_bert.modeling import gelu
 
 
 class ProductSimilarity(nn.Module):
@@ -40,6 +41,27 @@ class MultiClassHingeLoss(nn.Module):
         if do_mean:
             loss = loss / x.size(0)
         return loss
+
+
+class ProjectionTransform(nn.Module):
+    """
+    Defined in https://arxiv.org/pdf/1909.05855.pdf
+    """
+
+    def __init__(self, input_dim, num_classes, act_fn=gelu):
+        super(ProjectionTransform, self).__init__()
+        self.transform1 = nn.Linear(input_dim, input_dim)
+        self.transform2 = nn.Linear(input_dim * 2, input_dim)
+        self.transform3 = nn.Linear(input_dim, num_classes)
+        self.act_fn = act_fn
+
+    def forward(self, x, y, return_h2=False):
+        h1 = self.act_fn(self.transform1(x))
+        h2 = self.act_fn(self.transform2(torch.cat([y, h1], dim=-1)))
+        if return_h2:
+            return h2
+        vec_l = self.transform3(h2)
+        return vec_l
 
 
 # ===============================

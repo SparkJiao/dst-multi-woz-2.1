@@ -795,6 +795,8 @@ def main():
         from BeliefTrackerShareSA_stack_remove import BeliefTracker
     elif args.nbt == 'stack_ex':
         from BeliefTrackerShareSA_stack_ex import BeliefTracker
+    elif args.nbt == 'dstc':
+        from BeliefTracker_dstc import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
