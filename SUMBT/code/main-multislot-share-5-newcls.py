@@ -157,8 +157,11 @@ class Processor(DataProcessor):
             if slot == "pricerange":
                 self.target_slot[i] = "price range"
 
+        self.reverse = config.reverse
+
         logger.info('Processor: target_slot')
         logger.info(self.target_slot)
+        logger.info(f'Will reverse input: {self.reverse}')
 
     def get_train_examples(self, data_dir, accumulation=False, train_file=None):
         """See base class."""
@@ -206,6 +209,9 @@ class Processor(DataProcessor):
             else:
                 text_a = line[2]  # line[2]: user utterance
                 text_b = line[3]  # line[3]: system response
+
+                if self.reverse:
+                    text_a, text_b = text_b, text_a
 
             label = [line[4 + idx] for idx in self.target_slot_idx]
 
@@ -627,6 +633,7 @@ def main():
     parser.add_argument('--mask_self', default=False, action='store_true')
     parser.add_argument('--remove_some_slot', default=False, action='store_true')
     parser.add_argument('--extra_dropout', type=float, default=-1.)
+    parser.add_argument('--reverse', default=False, action='store_true')
 
     args = parser.parse_args()
 
