@@ -1,25 +1,28 @@
-import math
 import os.path
+from logging import Logger
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 from torch.nn import CrossEntropyLoss
 
 try:
     from . import layers
     from .modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from .global_logger import get_child_logger
 except ImportError:
     import layers
     from modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from global_logger import get_child_logger
+
+logger: Logger = get_child_logger(__name__)
 
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config, reduce_layers: int = 0, self_attention_type: int = 0):
         super(BertForUtteranceEncoding, self).__init__(config)
-        print(f'Reduce {reduce_layers} of BERT.')
-        print(f'Self Attention Type: {self_attention_type}')
+        logger.info(f'Reduce {reduce_layers} of BERT.')
+        logger.info(f'Self Attention Type: {self_attention_type}')
         config.num_hidden_layers = config.num_hidden_layers - reduce_layers
         config.slot_attention_type = -1
         config.key_type = 0
@@ -60,7 +63,7 @@ class BeliefTracker(nn.Module):
             for p in self.utterance_encoder.bert.pooler.parameters():
                 p.requires_grad = False
         if args.fix_bert:
-            print('Fix all parameters of bert encoder')
+            logger.info('Fix all parameters of bert encoder')
             for p in self.utterance_encoder.bert.parameters():
                 p.requires_grad = False
 
@@ -75,10 +78,10 @@ class BeliefTracker(nn.Module):
         # NBT
         nbt_config = self.sv_encoder.config
         nbt_config.num_attention_heads = self.attn_head
-        print(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
+        logger.info(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
         if args.override_attn:
-            print("Override self attention from last layer of BERT")
+            logger.info("Override self attention from last layer of BERT")
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm,
                                                          self_attention=last_attention)
@@ -86,7 +89,7 @@ class BeliefTracker(nn.Module):
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm)
         if args.share_position_weight:
-            print("Dialog self attention will share position embeddings with BERT")
+            logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         if args.cls_type == 0:
@@ -106,7 +109,11 @@ class BeliefTracker(nn.Module):
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         # Classifier
+        self.weighted_nll = CrossEntropyLoss(ignore_index=-1, reduction='sum', weight=torch.tensor([0.1, 0.5, 2],
+                                                                                                   dtype=torch.float))
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
+        logger.info(f"If weighted answer type classification: {args.weighted_cls}")
+        self.weighted_cls = args.weighted_cls
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
@@ -198,7 +205,7 @@ class BeliefTracker(nn.Module):
         loss_slot = []
         pred_slot = []
         output = []
-        for s, slot_id in enumerate(target_slot):   # note: target_slots are successive
+        for s, slot_id in enumerate(target_slot):  # note: target_slots are successive
             # loss calculation
             hid_label = self.value_lookup[slot_id].weight
             num_slot_labels = hid_label.size(0)
@@ -229,7 +236,10 @@ class BeliefTracker(nn.Module):
                 loss += _loss
 
             if answer_type_ids is not None:
-                cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
+                if self.weighted_cls:
+                    cls_loss = self.weighted_nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
+                else:
+                    cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 loss_slot[-1] += cls_loss.item()
                 loss += cls_loss
 
@@ -260,10 +270,12 @@ class BeliefTracker(nn.Module):
         # acc = sum(torch.sum(accuracy, 1) / slot_dim).float() / torch.sum(labels[:, :, 0].view(-1) > -1, 0).float()  # joint accuracy
 
         if n_gpu == 1:
-            return loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, torch.cat([answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1)
+            return loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, torch.cat(
+                [answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1)
         else:
-            return loss.unsqueeze(0), None, acc.unsqueeze(0), type_acc.unusqueeze(0), acc_slot.unsqueeze(0), type_acc_slot.unsqueeze(0), torch.cat([
-            answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1).unsqueeze(0)
+            return loss.unsqueeze(0), None, acc.unsqueeze(0), type_acc.unusqueeze(0), acc_slot.unsqueeze(0), type_acc_slot.unsqueeze(
+                0), torch.cat([
+                answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1).unsqueeze(0)
 
     @staticmethod
     def init_parameter(module):

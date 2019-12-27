@@ -651,6 +651,7 @@ def main():
     parser.add_argument('--extra_dropout', type=float, default=-1.)
     parser.add_argument('--reverse', default=False, action='store_true')
     parser.add_argument('--regularize_prob', default=0, type=int)
+    parser.add_argument('--weighted_cls', default=False, action='store_true')
 
     args = parser.parse_args()
 

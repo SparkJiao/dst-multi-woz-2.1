@@ -122,6 +122,10 @@ class BeliefTracker(nn.Module):
 
         # Classifier
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
+        self.weighted_nll = CrossEntropyLoss(ignore_index=-1, reduction='sum', weight=torch.tensor([0.1, 0.5, 2],
+                                                                                                   dtype=torch.float))
+        logger.info(f"If weighted answer type classification: {args.weighted_cls}")
+        self.weighted_cls = args.weighted_cls
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
@@ -308,7 +312,10 @@ class BeliefTracker(nn.Module):
                 loss += _loss
 
             if answer_type_ids is not None:
-                cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
+                if self.weighted_cls:
+                    cls_loss = self.weighted_nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
+                else:
+                    cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 loss_slot[-1] += cls_loss.item()
                 loss += cls_loss
 
