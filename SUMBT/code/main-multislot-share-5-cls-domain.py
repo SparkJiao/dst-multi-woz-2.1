@@ -805,6 +805,10 @@ def main():
         from BeliefTrackerShareSA_domain_baseline import BeliefTracker
     elif args.nbt == 'domain-prop':
         from BeliefTrackerShareSA_domain_prop import BeliefTracker
+    elif args.nbt == 'domain-fuse':
+        from BeliefTrackerShareSA_domain_fuse import BeliefTracker
+    elif args.nbt == 'domain-fuse-2':
+        from BeliefTrackerShareSA_domain_fuse2 import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -947,6 +951,10 @@ def main():
                                                           global_step)
                                 summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
                                                           global_step)
+                            if hasattr(model, "get_metric"):
+                                metric = model.get_metric(reset=False)
+                                for k, v in metric.items():
+                                    summary_writer.add_scalar(f"Train/{k}", v, global_step)
 
                     optimizer.step()
                     optimizer.zero_grad()
@@ -1031,6 +1039,10 @@ def main():
                                                   global_step)
                         summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
                                                   global_step)
+                    if hasattr(model, "get_metric"):
+                        metric = model.get_metric(reset=True)
+                        for k, v in metric.items():
+                            summary_writer.add_scalar(f"Validate/{k}", v, global_step)
 
             dev_loss = round(dev_loss, 6)
             # if last_update is None or dev_loss < best_loss:

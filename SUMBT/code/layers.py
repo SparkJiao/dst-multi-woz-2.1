@@ -2,6 +2,7 @@ import math
 
 import torch
 from pytorch_pretrained_bert.modeling import gelu
+from pytorch_pretrained_bert.modeling import BertConfig
 from torch import nn
 from torch.nn import functional as F
 
@@ -113,6 +114,30 @@ class MultiHeadAttention(nn.Module):
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(*new_context_layer_shape)
         return context_layer, (mixed_query_layer, mixed_key_layer, mixed_value_layer)
+
+
+class Attention(nn.Module):
+    def __init__(self, config: BertConfig, add_output: bool = True, use_residual: bool = False, add_layer_norm: bool = False):
+        super(Attention, self).__init__()
+        self.multi_head_attention = MultiHeadAttention(config)
+        self.linear = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+
+        self.use_residual = use_residual
+        self.add_layer_norm = add_layer_norm
+        self.add_output = add_output
+
+    def forward(self, query, key, value, attention_mask):
+        hidden, _ = self.multi_head_attention(query, key, value, attention_mask)
+
+        if self.add_output:
+            hidden = self.dropout(self.linear(hidden))
+        if self.add_layer_norm:
+            if self.use_residual:
+                hidden = query + hidden
+            hidden = self.LayerNorm(hidden)
+        return hidden
 
 
 class DynamicFusion(nn.Module):
