@@ -182,3 +182,13 @@ def masked_log_softmax_fp16(vector: torch.Tensor, mask: torch.Tensor, dim: int =
         vector = vector.float() + (mask + 1e-45).log()
         vector = vector.to(dtype=initial_dtype)
     return F.log_softmax(vector, dim=dim)
+
+
+def dropout_mask(x, value, mask=None, p=0.):
+    prop = (1 - p) * x.new_ones(x.size(), dtype=torch.float)
+    if mask is not None:
+        prop[mask] = 0.
+    mask = torch.bernoulli(prop)
+    new_x = x.masked_fill(mask.byte(), value)
+    return new_x
+

@@ -95,12 +95,12 @@ class BeliefTracker(nn.Module):
             logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
-        # self.domain_fusion1 = layers.Attention(nbt_config, add_output=False, use_residual=False, add_layer_norm=False)
-        # self.fusion_projection = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
-        self.domain_fusion2 = layers.Attention(nbt_config, add_output=True, use_residual=False, add_layer_norm=False)
-
-        self.domain_classifier = nn.Linear(self.bert_output_dim, 2)
-        self.classifier = layers.ProjectionTransform(self.bert_output_dim, num_classes=3)
+        self.turn_classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
+                                               nn.Tanh(),
+                                               nn.Linear(self.bert_output_dim, 3))
+        self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
+                                        nn.Tanh(),
+                                        nn.Linear(self.bert_output_dim, 3))
 
         self.domain_spans = []
         self.domain_lens = []
@@ -118,9 +118,29 @@ class BeliefTracker(nn.Module):
 
         # Classifier
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
+        """ Weight Version 2.0 """
+        # self.weighted_nll = CrossEntropyLoss(ignore_index=-1, reduction='sum',
+        #                                      weight=torch.tensor([1.0, 3.0, 2.0], dtype=torch.float))
+        # self.weighted_domain_nll = CrossEntropyLoss(ignore_index=-1, reduction='sum',
+        #                                             weight=torch.tensor([2.0, 1.0], dtype=torch.float))
+        """ Weight Version 3.0 """
+        # self.weighted_nll = CrossEntropyLoss(ignore_index=-1, reduction='sum',
+        #                                      weight=torch.tensor([1.0, 5.0, 4.0], dtype=torch.float))
+        # self.weighted_domain_nll = CrossEntropyLoss(ignore_index=-1, reduction='sum',
+        #                                             weight=torch.tensor([4.0, 1.0], dtype=torch.float))
+
+        # logger.info(f"If weighted answer type classification: {args.weighted_cls}")
+        # self.weighted_cls = args.weighted_cls
+        # logger.info(f"If weighted domain classification: {args.weighted_domain_cls}")
+        # self.weighted_domain_cls = args.weighted_domain_cls
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
+        self.turn_lambda = args.turn_lambda
+        logger.info(f"Turn coherent: {self.turn_lambda}")
+
+        self.none_dropout_p = args.none_dropout
+        logger.info(f"None type dropout: {self.none_dropout_p}")
 
         # Extra metric
         self.domain_cls_acc = {
@@ -186,16 +206,11 @@ class BeliefTracker(nn.Module):
         self.domain_spans = domain_spans
         self.domain_lens = [e - s for (s, e) in domain_spans]
 
-        slot_dim = self.slot_ids.size(0)
-        domain_mask = self.slot_ids.new_zeros((slot_dim, slot_dim), dtype=torch.long)
-        for domain_idx, (domain_s, domain_e) in enumerate(self.domain_spans):
-            domain_len = self.domain_lens[domain_idx]
-            domain_mask[domain_s:domain_e, domain_s:domain_e] = domain_mask.new_ones((domain_len, domain_len))
-        self.register_buffer("domain_mask", domain_mask)
-
         logger.info(f'Domain spans: {self.domain_spans}')
 
-    def forward(self, input_ids, token_type_ids, attention_mask, answer_type_ids, labels, n_gpu=1, target_slot=None):
+    def forward(self, input_ids, token_type_ids, attention_mask, answer_type_ids, labels,
+                turn_answer_type_ids, turn_labels, domain_labels, turn_domain_labels,
+                n_gpu=1, target_slot=None):
 
         # if target_slot is not specified, output values corresponding all slot-types
         if target_slot is None:
@@ -227,66 +242,19 @@ class BeliefTracker(nn.Module):
         hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=slot_token_type_ids, attention_mask=slot_mask,
                                               output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
                                               start_offset=self.max_seq_length, slot_dim=slot_dim)
-        # hidden = hidden[:, 0].view(slot_dim, bs, -1)
-        # domain_hidden = hidden.transpose(0, 1).contiguous()
-        # domain_mask = (1. - self.domain_mask[None, None, :, :].to(next(self.parameters()).dtype)) * -10000.0
-        # domain_hidden = self.domain_fusion1(domain_hidden, domain_hidden, domain_hidden, domain_mask)
-        # hidden = self.fusion_projection(torch.cat([
-        #     hidden.view(slot_dim * ds, ts, -1),
-        #     domain_hidden.transpose(0, 1).reshape(slot_dim * ds, ts, -1)
-        # ], dim=-1))
 
-        domain_mask = (1. - self.domain_mask[None, None, :, :].to(next(self.parameters()).dtype)) * -10000.0
-        hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
+        turn_hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
+
         # NBT
-        hidden = self.transformer(hidden, None).view(slot_dim, bs, -1).transpose(0, 1).contiguous()
-        hidden = self.domain_fusion2(hidden, hidden, hidden, domain_mask).transpose(0, 1).view(slot_dim, ds, ts, -1)
+        hidden = self.transformer(turn_hidden, None).view(slot_dim, ds, ts, -1)
 
-        domain_h = []
-        ex_hidden = []
-        domain_labels = []
-        for domain_idx, (domain_s, domain_e) in enumerate(self.domain_spans):
-            _domain_h = hidden[domain_s:domain_e].mean(dim=0).unsqueeze(0)
-            domain_h.append(_domain_h)
-            ex_hidden.append(_domain_h.expand(self.domain_lens[domain_idx], -1, -1, -1))
-            domain_label = labels[:, :, domain_s:domain_e].sum(dim=-1)
-            domain_label.clamp_(-1, 1)
-            domain_labels.append(domain_label.unsqueeze(0))
-        domain_h = torch.cat(domain_h, dim=0)  # (num_domain, ds, ts, h)
-        ex_hidden = torch.cat(ex_hidden, dim=0)  # (slot_dim, ds, ts, h)
+        turn_hidden = turn_hidden.view(slot_dim, ds, ts, -1)
+        turn_answer_type_logits = self.turn_classifier(turn_hidden)
 
-        domain_labels = torch.cat(domain_labels, dim=0).view(-1)  # (num_domain, ds, ts)
-        domain_logits = self.domain_classifier(domain_h)
-        loss = self.nll(domain_logits.view(-1, 2), domain_labels) / ds
-        self.domain_cls_acc["train" if self.training else "eval"](domain_logits.view(-1, 2).float(), domain_labels, mask=(domain_labels != -1))
-        self.domain_cls_pos_f1["train" if self.training else "eval"](domain_logits.view(-1, 2).float(), domain_labels,
-                                                                    mask=(domain_labels != -1))
-        self.domain_cls_neg_f1["train" if self.training else "eval"](domain_logits.view(-1, 2).float(), domain_labels,
-                                                                     mask=(domain_labels != -1))
-        self.domain_cls_loss_avg["train" if self.training else "eval"](loss.item())
-
-        answer_type_logits = self.classifier(hidden, ex_hidden)
+        answer_type_logits = self.classifier(hidden)
         _, answer_type_pred = answer_type_logits.max(dim=-1)
 
-        # if self.regularize_prob == 1:
-        #     detached_type_logits = answer_type_logits.detach()
-        #     expanded_domain_logits = []
-        #     for d in range(domain_logits.size(0)):
-        #         expanded_domain_logits.append(domain_logits[d].detach().unsqueeze(0).expand(self.domain_lens[d], -1, -1, -1))
-        #     detached_type_logits[:, :, :, 0] += torch.cat(expanded_domain_logits, dim=0)[:, :, :, 0]
-        #     _, answer_type_pred = detached_type_logits.max(dim=-1)
-        # elif self.regularize_prob == 2:
-        #     detached_type_logits = answer_type_logits.detach()
-        #     expanded_domain_logits = []
-        #     for d in range(domain_logits.size(0)):
-        #         expanded_domain_logits.append(domain_logits[d].detach().unsqueeze(0).expand(self.domain_lens[d], -1, -1, -1))
-        #     prob_scale = torch.softmax(torch.cat(expanded_domain_logits, dim=0), dim=-1)
-        #     detached_type_logits[:, :, :, 0] *= prob_scale[:, :, :, 0]
-        #     detached_type_logits[:, :, :, 1:] *= prob_scale[:, :, :, 1].unsqueeze(-1)
-        #     _, answer_type_pred = detached_type_logits.max(dim=-1)
-
-        # Label (slot-value) encoding
-        # loss = 0
+        loss = 0
         loss_slot = []
         pred_slot = []
         output = []
@@ -297,16 +265,27 @@ class BeliefTracker(nn.Module):
 
             if self.distance_metric == 'product':
                 _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
+
                 _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
                 _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
+
+                _turn_hidden = turn_hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
+                _turn_dist = self.metric(_turn_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
             else:
                 _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
+
                 _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
                     ds * ts * num_slot_labels, -1)
                 _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
 
+                _turn_hidden = turn_hidden[s].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
+                    ds * ts * num_slot_labels, -1)
+                _turn_dist = self.metric(_hid_label, _turn_hidden).view(ds, ts, num_slot_labels)
+
             if self.distance_metric == "euclidean":
                 _dist = -_dist
+                _turn_dist = -_turn_dist
+
             _, pred = torch.max(_dist, -1)
             pred_slot.append(pred.view(ds, ts, 1))
             output.append(_dist)
@@ -320,10 +299,29 @@ class BeliefTracker(nn.Module):
                 loss_slot.append(_loss.item())
                 loss += _loss
 
+                undefined_value_mask = (turn_labels[:, :, s] == num_slot_labels)
+                masked_turn_slot_labels_for_loss = turn_labels[:, :, s].masked_fill(undefined_value_mask, -1)
+
+                _turn_loss = self.turn_lambda * self.nll(_turn_dist.view(ds * ts, -1), masked_turn_slot_labels_for_loss.view(-1)) / ds
+                loss_slot[-1] += _turn_loss.item()
+                loss += _turn_loss
+
             if answer_type_ids is not None:
                 cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
+                # if self.weighted_cls:
+                #     cls_loss = self.weighted_nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
+                # else:
+                #     cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 loss_slot[-1] += cls_loss.item()
                 loss += cls_loss
+
+                if self.training and self.none_dropout_p > 0:
+                    turn_answer_type_ids = layers.dropout_mask(turn_answer_type_ids, mask=(turn_answer_type_ids != 0),
+                                                               value=-1, p=self.none_dropout_p)
+
+                turn_cls_loss = self.turn_lambda * self.nll(turn_answer_type_logits[s].view(ds * ts, -1), turn_answer_type_ids[:, :, s].view(-1)) / ds
+                loss_slot[-1] += turn_cls_loss.item()
+                loss += turn_cls_loss
 
         if labels is None:
             return output
@@ -371,32 +369,31 @@ class BeliefTracker(nn.Module):
             torch.nn.init.constant_(module.bias_hh_l0, 0.0)
 
 
-    def get_metric(self, reset=False):
-
-        if self.training:
-            domain_cls_pos_fscore = self.domain_cls_pos_f1["train"].get_metric(reset=reset)
-            domain_cls_neg_fscore = self.domain_cls_neg_f1["train"].get_metric(reset=reset)
-            metric = {
-                "Acc_domain_cls": self.domain_cls_acc["train"].get_metric(reset=reset),
-                "Loss_domain_cls": self.domain_cls_loss_avg["train"].get_metric(reset=reset),
-                "Precision_domain_pos_cls": domain_cls_pos_fscore[0],
-                "Recall_domain_pos_cls": domain_cls_pos_fscore[1],
-                "F1_domain_pos_cls": domain_cls_pos_fscore[2],
-                "Precision_domain_neg_cls": domain_cls_neg_fscore[0],
-                "Recall_domain_neg_cls": domain_cls_neg_fscore[1],
-                "F1_domain_neg_cls": domain_cls_neg_fscore[2],
-            }
-        else:
-            domain_cls_pos_fscore = self.domain_cls_pos_f1["eval"].get_metric(reset=reset)
-            domain_cls_neg_fscore = self.domain_cls_neg_f1["eval"].get_metric(reset=reset)
-            metric = {
-                "domain_cls_acc": self.domain_cls_acc["eval"].get_metric(reset=reset),
-                "Loss_domain_cls": self.domain_cls_loss_avg["eval"].get_metric(reset=reset),
-                "Precision_domain_pos_cls": domain_cls_pos_fscore[0],
-                "Recall_domain_pos_cls": domain_cls_pos_fscore[1],
-                "F1_domain_pos_cls": domain_cls_pos_fscore[2],
-                "Precision_domain_neg_cls": domain_cls_neg_fscore[0],
-                "Recall_domain_neg_cls": domain_cls_neg_fscore[1],
-                "F1_domain_neg_cls": domain_cls_neg_fscore[2],
-            }
-        return metric
+    # def get_metric(self, reset=False):
+    #     if self.training:
+    #         domain_cls_pos_fscore = self.domain_cls_pos_f1["train"].get_metric(reset=reset)
+    #         domain_cls_neg_fscore = self.domain_cls_neg_f1["train"].get_metric(reset=reset)
+    #         metric = {
+    #             "Acc_domain_cls": self.domain_cls_acc["train"].get_metric(reset=reset),
+    #             "Loss_domain_cls": self.domain_cls_loss_avg["train"].get_metric(reset=reset),
+    #             "Precision_domain_pos_cls": domain_cls_pos_fscore[0],
+    #             "Recall_domain_pos_cls": domain_cls_pos_fscore[1],
+    #             "F1_domain_pos_cls": domain_cls_pos_fscore[2],
+    #             "Precision_domain_neg_cls": domain_cls_neg_fscore[0],
+    #             "Recall_domain_neg_cls": domain_cls_neg_fscore[1],
+    #             "F1_domain_neg_cls": domain_cls_neg_fscore[2],
+    #         }
+    #     else:
+    #         domain_cls_pos_fscore = self.domain_cls_pos_f1["eval"].get_metric(reset=reset)
+    #         domain_cls_neg_fscore = self.domain_cls_neg_f1["eval"].get_metric(reset=reset)
+    #         metric = {
+    #             "domain_cls_acc": self.domain_cls_acc["eval"].get_metric(reset=reset),
+    #             "Loss_domain_cls": self.domain_cls_loss_avg["eval"].get_metric(reset=reset),
+    #             "Precision_domain_pos_cls": domain_cls_pos_fscore[0],
+    #             "Recall_domain_pos_cls": domain_cls_pos_fscore[1],
+    #             "F1_domain_pos_cls": domain_cls_pos_fscore[2],
+    #             "Precision_domain_neg_cls": domain_cls_neg_fscore[0],
+    #             "Recall_domain_neg_cls": domain_cls_neg_fscore[1],
+    #             "F1_domain_neg_cls": domain_cls_neg_fscore[2],
+    #         }
+    #     return metric

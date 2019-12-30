@@ -395,6 +395,62 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     return all_input_ids, all_input_len, all_answer_type_ids, all_label_ids
 
 
+def get_turn_labels(answer_type_ids: torch.Tensor, label_ids: torch.Tensor):
+    """
+    for each turn, if the type of current answer is the same as before, mark it as `none`
+    except that the answer types are both `2`, which depends on the value.
+    :param answer_type_ids: (data_num, max_turn_length, slot_dim)
+    :param label_ids:  (data_num, max_turn_length, slot_dim)
+    :return:
+    """
+    data_num, max_turn_length, slot_dim = answer_type_ids.size()
+    turn_answer_type_ids = torch.zeros((data_num, max_turn_length, slot_dim), dtype=torch.long).fill_(-1)
+    turn_value_ids = torch.zeros((data_num, max_turn_length, slot_dim), dtype=torch.long).fill_(-1)
+    turn_label_num = 0
+
+    for i in tqdm(range(data_num), desc='generating turn labels'):
+        for j in range(max_turn_length):
+            if answer_type_ids[i, j, 0] == -1:
+                break
+            if j == 0:
+                turn_answer_type_ids[i, j, :] = answer_type_ids[i, j, :]
+                turn_value_ids[i, j, :] = label_ids[i, j, :]
+                turn_label_num += slot_dim
+            else:
+                for s in range(slot_dim):
+                    if answer_type_ids[i, j, s] in [0, 1]:
+                        if answer_type_ids[i, j, s] == answer_type_ids[i, j - 1, s]:
+                            turn_answer_type_ids[i, j, s] = 0
+                        else:
+                            turn_answer_type_ids[i, j, s] = answer_type_ids[i, j, s]
+                            turn_label_num += 1
+                    else:
+                        if answer_type_ids[i, j, s] == answer_type_ids[i, j - 1, s] and label_ids[i, j, s] == \
+                                label_ids[i, j - 1, s]:
+                            turn_answer_type_ids[i, j, s] = 0
+                        else:
+                            turn_answer_type_ids[i, j, s] = answer_type_ids[i, j, s]
+                            turn_value_ids[i, j, s] = label_ids[i, j, s]
+                            turn_label_num += 1
+
+    logger.info(f'Generate turn labels: {turn_label_num}')
+    return turn_answer_type_ids, turn_value_ids
+
+
+def get_domain_labels(answer_type_ids: torch.Tensor, domain_spans):
+    domain_labels = torch.zeros((answer_type_ids.size(0), answer_type_ids.size(1), len(domain_spans)), dtype=torch.long)
+    domain_labels.fill_(-1)
+    for domain_idx, (domain_s, domain_e) in enumerate(domain_spans):
+        domain_type_ids = answer_type_ids[:, :, domain_s:domain_e]
+        domain_ids = domain_type_ids.sum(dim=-1)
+        domain_ids.clamp_(-1, 1)
+        domain_labels[:, :, domain_idx] = domain_ids
+    positive_labels = (domain_labels == 1).sum()
+    negative_labels = (domain_labels == 0).sum()
+    logger.info(f'Generate domain labels: Positive == {positive_labels}, Negative == {negative_labels}')
+    return domain_labels
+
+
 def get_label_embedding(labels, max_seq_length, tokenizer, device):
     features = []
     for label in labels:
@@ -653,6 +709,8 @@ def main():
     parser.add_argument('--regularize_prob', default=0, type=int)
     parser.add_argument('--weighted_cls', default=False, action='store_true')
     parser.add_argument('--weighted_domain_cls', default=False, action='store_true')
+    parser.add_argument('--turn_lambda', type=float, default=0.8)
+    parser.add_argument('--none_dropout', type=float, default=0.)
 
     args = parser.parse_args()
 
@@ -742,6 +800,9 @@ def main():
         all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
+        all_turn_answer_type_ids, all_turn_label_ids = get_turn_labels(all_answer_type_ids, all_label_ids)
+        all_domain_labels = get_domain_labels(all_answer_type_ids, processor.domain_spans)
+        all_turn_domain_labels = get_domain_labels(all_turn_answer_type_ids, processor.domain_spans)
 
         num_train_features = all_input_ids.size(0)
         num_train_steps = int(
@@ -752,10 +813,10 @@ def main():
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_steps)
 
-        # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
-
         train_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
-                                   all_label_ids)
+                                   all_label_ids, all_turn_answer_type_ids, all_turn_label_ids,
+                                   all_domain_labels, all_turn_domain_labels)
+
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -768,6 +829,10 @@ def main():
         all_input_ids_dev, all_input_len_dev, all_answer_type_ids_dev, all_label_ids_dev = convert_examples_to_features(
             dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids_dev, all_input_mask_dev = make_aux_tensors(all_input_ids_dev, all_input_len_dev)
+        all_turn_answer_type_ids_dev, all_turn_label_ids_dev = get_turn_labels(all_answer_type_ids_dev,
+                                                                               all_label_ids_dev)
+        all_domain_labels_dev = get_domain_labels(all_answer_type_ids_dev, processor.domain_spans)
+        all_turn_domain_labels_dev = get_domain_labels(all_turn_answer_type_ids_dev, processor.domain_spans)
         num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
 
         logger.info("***** Running validation *****")
@@ -775,11 +840,9 @@ def main():
         logger.info("  Batch size = %d", args.dev_batch_size)
         logger.info("  Num steps = %d", num_dev_steps)
 
-        # all_input_ids_dev, all_input_len_dev, all_label_ids_dev = \
-        #     all_input_ids_dev.to(device), all_input_len_dev.to(device), all_label_ids_dev.to(device)
-
-        dev_data = TensorDataset(all_input_ids_dev,
-                                 all_token_type_ids_dev, all_input_mask_dev, all_answer_type_ids_dev, all_label_ids_dev)
+        dev_data = TensorDataset(all_input_ids_dev, all_token_type_ids_dev, all_input_mask_dev, all_answer_type_ids_dev,
+                                 all_label_ids_dev, all_turn_answer_type_ids_dev, all_turn_label_ids_dev,
+                                 all_domain_labels_dev, all_turn_domain_labels_dev)
         dev_sampler = SequentialSampler(dev_data)
         dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
 
@@ -793,23 +856,8 @@ def main():
     if args.nbt == 'rnn':
         logger.info("Use rnn as neural belief tracker")
         from BeliefTrackerShare import BeliefTracker
-    elif args.nbt == 'transformer':
-        logger.info("Use transformer as neural belief tracker")
-        from BeliefTrackerShareTransformer import BeliefTracker
-    elif args.nbt == 'sa':
-        logger.info("Use simple self-attention as neural belief tracker")
-        from BeliefTrackerShareSA import BeliefTracker
-    elif args.nbt == 'flat_test1':
-        logger.info("This is another test for flat slot attention but self attention mask.")
-        from BeliefTrackerShareSA_flat_test1_cls import BeliefTracker
-    elif args.nbt == 'domain-baseline':
-        from BeliefTrackerShareSA_domain_baseline import BeliefTracker
-    elif args.nbt == 'domain-prop':
-        from BeliefTrackerShareSA_domain_prop import BeliefTracker
-    elif args.nbt == 'domain-fuse':
-        from BeliefTrackerShareSA_domain_fuse import BeliefTracker
-    elif args.nbt == 'domain-fuse-2':
-        from BeliefTrackerShareSA_domain_fuse2 import BeliefTracker
+    elif args.nbt == 'turn-baseline':
+        from BeliefTrackerShareSA_turn_baseline import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -909,15 +957,12 @@ def main():
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
                 batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-                input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
 
                 # Forward
                 if n_gpu == 1:
-                    loss, loss_slot, acc, _, acc_slot, _, _ = \
-                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                    loss, loss_slot, acc, _, acc_slot, _, _ = model(*batch, n_gpu=n_gpu)
                 else:
-                    loss, _, acc, _, acc_slot, _, _ = \
-                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                    loss, _, acc, _, acc_slot, _, _ = model(*batch, n_gpu=n_gpu)
 
                     # average to multi-gpus
                     loss = loss.mean()
@@ -936,7 +981,7 @@ def main():
                     loss.backward()
 
                 tr_loss += loss.item()
-                nb_tr_examples += input_ids.size(0)
+                nb_tr_examples += batch[0].size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     # modify lealrning rate with special warm up BERT uses
@@ -971,30 +1016,26 @@ def main():
 
             for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
-                batch_size = input_ids.size(0)
-                if input_ids.dim() == 2:
-                    input_ids = input_ids.unsqueeze(0)
-                    token_type_ids = token_type_ids.unsqueeze(0)
-                    input_mask = input_mask.unsqueeze(0)
-                    answer_type_ids = answer_type_ids.unsqueeze(0)
-                    label_ids = label_ids.unsuqeeze(0)
+                batch_size = batch[0].size(0)
+                # if input_ids.dim() == 2:
+                #     input_ids = input_ids.unsqueeze(0)
+                #     token_type_ids = token_type_ids.unsqueeze(0)
+                #     input_mask = input_mask.unsqueeze(0)
+                #     answer_type_ids = answer_type_ids.unsqueeze(0)
+                #     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, _ \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, _ = model(*batch, n_gpu=n_gpu)
                     else:
-                        loss, _, acc, type_acc, acc_slot, type_acc_slot, _ \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        loss, _, acc, type_acc, acc_slot, type_acc_slot, _ = model(*batch, n_gpu=n_gpu)
 
                         # average to multi-gpus
                         loss = loss.mean()
                         acc = acc.mean()
                         acc_slot = acc_slot.mean(0)
 
-                num_valid_turn = torch.sum(answer_type_ids[:, :, 0].view(-1) > -1,
-                                           0).item()  # valid turns for all current batch
+                num_valid_turn = torch.sum(batch[3][:, :, 0].view(-1) > -1, 0).item()  # valid turns for all current batch
                 # dev_loss += loss.item() * num_valid_turn
                 dev_acc += acc.item() * num_valid_turn
                 dev_loss += loss.item() * batch_size
@@ -1138,14 +1179,17 @@ def main():
             all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
             all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
-            # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device),
-            # all_label_ids.to(device)
+            all_turn_answer_type_ids, all_turn_label_ids = get_turn_labels(all_answer_type_ids, all_label_ids)
+            all_domain_labels = get_domain_labels(all_answer_type_ids, processor.domain_spans)
+            all_turn_domain_labels = get_domain_labels(all_turn_answer_type_ids, processor.domain_spans)
+
             logger.info("***** Running evaluation *****")
             logger.info("  Num examples = %d", len(eval_examples))
             logger.info("  Batch size = %d", args.eval_batch_size)
 
             eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
-                                      all_label_ids)
+                                      all_label_ids, all_turn_answer_type_ids, all_turn_label_ids,
+                                      all_domain_labels, all_turn_domain_labels)
 
             # Run prediction for full data
             eval_sampler = SequentialSampler(eval_data)
@@ -1170,35 +1214,27 @@ def main():
                           'num_slot_train': 0}
             predictions = []
 
-            for input_ids, token_type_ids, input_mask, answer_type_ids, label_ids in tqdm(eval_dataloader,
-                                                                                          desc="Evaluating"):
-                input_ids = input_ids.to(device)
-                token_type_ids = token_type_ids.to(device)
-                input_mask = input_mask.to(device)
-                answer_type_ids = answer_type_ids.to(device)
-                label_ids = label_ids.to(device)
-                if input_ids.dim() == 2:
-                    input_ids = input_ids.unsqueeze(0)
-                    token_type_ids = token_type_ids.unsqueeze(0)
-                    input_mask = input_mask.unsqueeze(0)
-                    answer_type_ids = answer_type_ids.unsqueeze(0)
-                    label_ids = label_ids.unsuqeeze(0)
+            for batch in tqdm(eval_dataloader, desc="Evaluating"):
+                # if input_ids.dim() == 2:
+                #     input_ids = input_ids.unsqueeze(0)
+                #     token_type_ids = token_type_ids.unsqueeze(0)
+                #     input_mask = input_mask.unsqueeze(0)
+                #     answer_type_ids = answer_type_ids.unsqueeze(0)
+                #     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot = model(*batch, n_gpu)
                     else:
-                        loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
-                        nbatch = label_ids.size(0)
+                        loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot = model(*batch, n_gpu)
+                        nbatch = batch[4].size(0)
                         nslot = pred_slot.size(3)
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
 
-                accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
-                predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor))
+                accuracies = eval_all_accs(pred_slot, batch[3], batch[4], accuracies)
+                predictions.extend(get_predictions(pred_slot, batch[3], batch[4], processor))
 
-                nb_eval_ex = (answer_type_ids[:, :, 0].view(-1) != -1).sum().item()
+                nb_eval_ex = (batch[3][:, :, 0].view(-1) != -1).sum().item()
                 nb_eval_examples += nb_eval_ex
                 nb_eval_steps += 1
 

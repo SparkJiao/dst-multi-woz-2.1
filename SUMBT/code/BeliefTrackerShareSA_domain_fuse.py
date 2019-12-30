@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 from torch.nn import CrossEntropyLoss
-from allennlp.training.metrics import CategoricalAccuracy, Average
+from allennlp.training.metrics import CategoricalAccuracy, Average, F1Measure
 
 try:
     from . import layers
@@ -126,6 +126,14 @@ class BeliefTracker(nn.Module):
         self.domain_cls_acc = {
             "train": CategoricalAccuracy(),
             "eval": CategoricalAccuracy()
+        }
+        self.domain_cls_pos_f1 = {
+            "train": F1Measure(positive_label=1),
+            "eval": F1Measure(positive_label=1)
+        }
+        self.domain_cls_neg_f1 = {
+            "train": F1Measure(positive_label=0),
+            "eval": F1Measure(positive_label=0)
         }
         self.domain_cls_loss_avg = {
             "train": Average(),
@@ -249,6 +257,10 @@ class BeliefTracker(nn.Module):
         domain_logits = self.domain_classifier(domain_h)
         loss = self.nll(domain_logits.view(-1, 2), domain_labels) / ds
         self.domain_cls_acc["train" if self.training else "eval"](domain_logits.view(-1, 2).float(), domain_labels, mask=(domain_labels != -1))
+        self.domain_cls_pos_f1["train" if self.training else "eval"](domain_logits.view(-1, 2).float(), domain_labels,
+                                                                    mask=(domain_labels != -1))
+        self.domain_cls_neg_f1["train" if self.training else "eval"](domain_logits.view(-1, 2).float(), domain_labels,
+                                                                     mask=(domain_labels != -1))
         self.domain_cls_loss_avg["train" if self.training else "eval"](loss.item())
 
         answer_type_logits = self.classifier(hidden, ex_hidden)
@@ -359,13 +371,29 @@ class BeliefTracker(nn.Module):
 
     def get_metric(self, reset=False):
         if self.training:
+            domain_cls_pos_fscore = self.domain_cls_pos_f1["train"].get_metric(reset=reset)
+            domain_cls_neg_fscore = self.domain_cls_neg_f1["train"].get_metric(reset=reset)
             metric = {
                 "Acc_domain_cls": self.domain_cls_acc["train"].get_metric(reset=reset),
-                "Loss_domain_cls": self.domain_cls_loss_avg["train"].get_metric(reset=reset)
+                "Loss_domain_cls": self.domain_cls_loss_avg["train"].get_metric(reset=reset),
+                "Precision_domain_pos_cls": domain_cls_pos_fscore[0],
+                "Recall_domain_pos_cls": domain_cls_pos_fscore[1],
+                "F1_domain_pos_cls": domain_cls_pos_fscore[2],
+                "Precision_domain_neg_cls": domain_cls_neg_fscore[0],
+                "Recall_domain_neg_cls": domain_cls_neg_fscore[1],
+                "F1_domain_neg_cls": domain_cls_neg_fscore[2],
             }
         else:
+            domain_cls_pos_fscore = self.domain_cls_pos_f1["eval"].get_metric(reset=reset)
+            domain_cls_neg_fscore = self.domain_cls_neg_f1["eval"].get_metric(reset=reset)
             metric = {
                 "domain_cls_acc": self.domain_cls_acc["eval"].get_metric(reset=reset),
-                "Loss_domain_cls": self.domain_cls_loss_avg["eval"].get_metric(reset=reset)
+                "Loss_domain_cls": self.domain_cls_loss_avg["eval"].get_metric(reset=reset),
+                "Precision_domain_pos_cls": domain_cls_pos_fscore[0],
+                "Recall_domain_pos_cls": domain_cls_pos_fscore[1],
+                "F1_domain_pos_cls": domain_cls_pos_fscore[2],
+                "Precision_domain_neg_cls": domain_cls_neg_fscore[0],
+                "Recall_domain_neg_cls": domain_cls_neg_fscore[1],
+                "F1_domain_neg_cls": domain_cls_neg_fscore[2],
             }
         return metric
