@@ -1,10 +1,18 @@
 import math
+import logging
 
 import torch
 from pytorch_pretrained_bert.modeling import gelu
 from pytorch_pretrained_bert.modeling import BertConfig
 from torch import nn
 from torch.nn import functional as F
+
+try:
+    from .global_logger import get_child_logger
+except:
+    from global_logger import get_child_logger
+
+logger: logging.Logger = get_child_logger(__name__)
 
 
 class ProductSimilarity(nn.Module):
@@ -87,7 +95,7 @@ class MultiHeadAttention(nn.Module):
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, query, key, value, attention_mask):
+    def forward(self, query, key, value, attention_mask, return_score: bool = False):
         mixed_query_layer = self.query(query)
         mixed_key_layer = self.key(key)
         mixed_value_layer = self.value(value)
@@ -99,6 +107,11 @@ class MultiHeadAttention(nn.Module):
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        unmasked_scores = attention_scores
+
+        if return_score:
+            return unmasked_scores, (mixed_query_layer, mixed_key_layer, mixed_value_layer)
+
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
         attention_scores = attention_scores + attention_mask
 
@@ -113,7 +126,7 @@ class MultiHeadAttention(nn.Module):
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(*new_context_layer_shape)
-        return context_layer, (mixed_query_layer, mixed_key_layer, mixed_value_layer)
+        return context_layer, (mixed_query_layer, mixed_key_layer, mixed_value_layer, unmasked_scores)
 
 
 class Attention(nn.Module):
@@ -156,16 +169,128 @@ class DynamicFusion(nn.Module):
         """
         y_t = self.act_fn(self.transform1(y))
         z = torch.cat([x, y_t, x - y_t, x * y_t], dim=-1)
-        gate = F.sigmoid(self.gate_f(z))
+        gate = torch.sigmoid(self.gate_f(z))
         fusion = self.act_fn(self.fuse_f(z))
         res = gate * fusion + (1 - gate) * x
         # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
         return res
 
 
+class HierarchicalAttention(nn.Module):
+    def __init__(self, config: BertConfig, add_output=False, residual=False, do_layer_norm=False):
+        super(HierarchicalAttention, self).__init__()
+        logger.info(f'{self.__class__.__name__} parameters:')
+        self.word_attention = MultiHeadAttention(config)
+        self.sentence_attention = MultiHeadAttention(config)
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.add_output = add_output
+        self.residual = residual
+        self.do_layer_norm = do_layer_norm
+        logger.info(f'Num attention head: {self.num_attention_heads}')
+        logger.info(f'add_output: {self.add_output}')
+        logger.info(f'residual: {self.residual}')
+        logger.info(f'do_layer_norm: {self.do_layer_norm}')
+        if self.add_output:
+            self.output = nn.Sequential(nn.Linear(config.hidden_size, config.hidden_size),
+                                        nn.Dropout(config.hidden_dropout_prob))
+            if self.do_layer_norm:
+                self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    @staticmethod
+    def _fold(x, size1, size2):
+        return x.reshape(x.size(0) * size1, size2, x.size(-1))
+
+    @staticmethod
+    def _unfold(x, size1, size2):
+        return x.reshape(x.size(0) // size1, size1 * size2, x.size(-1))
+
+    def forward(self, query, key, value, key_vec, word_mask, sentence_mask=None, return_sentence_score=False):
+        """
+        :param query: [batch, seq_len1, h]
+        :param key: [batch, seq_len1, seq_len2, h]
+        :param value: [batch, seq_len1, seq_len2, h]
+        :param key_vec: [batch, seq_len1, h]
+        :param word_mask: [batch, seq_len1, seq_len2]
+        :param sentence_mask: [batch * seq_len1, seq_len1]
+        :param return_sentence_score
+        :return:
+        """
+        word_mask = (1 - word_mask.to(dtype=next(self.parameters()).dtype)) * -10000.0
+        sentence_mask = (1 - sentence_mask.to(dtype=next(self.parameters()).dtype)) * -10000.0 if sentence_mask is not None else \
+            key.new_zeros(key_vec.size(0) * key_vec.size(1), key_vec.size(1))
+
+        bs, seq1, seq2, _ = key.size()
+        query_seq = query.size(1)
+        flat_key = key.view(bs, seq1 * seq2, -1)
+        value = value.view(bs * seq1, seq2, -1)
+        # (batch, num_head, q_seq, seq1 * seq2)
+        scores1, (_, _, value) = self.word_attention(query, flat_key, value, attention_mask=None, return_score=True)
+        scores1 = scores1.reshape(bs, self.num_attention_heads, query_seq, seq1, seq2).permute(0, 3, 1, 2, 4).reshape(
+            bs * seq1, self.num_attention_heads, query_seq, seq2)
+        word_mask = word_mask.reshape(bs * seq1, seq2)[:, None, None, :]
+        value1 = self.transpose_for_scores(value)  # (batch * seq1, num_head, seq2, h)
+        prob = self.dropout(torch.softmax(scores1 + word_mask, dim=-1))
+        word_hidden = prob.matmul(value1)  # (batch * seq1, num_head, q_seq, h)
+        # (batch * q_seq, seq1, h)
+        word_hidden = word_hidden.permute(0, 2, 1, 3).reshape(bs, seq1, query_seq, -1).transpose(1, 2).reshape(
+            bs * query_seq, seq1, -1)
+
+        if sentence_mask.dim() == 3:
+            sentence_mask = sentence_mask[:, None, :, :]
+        elif sentence_mask.dim() == 2:
+            sentence_mask = sentence_mask[:, None, None, :]
+
+        query = query.view(bs * query_seq, 1, -1)
+        key_vec = key_vec.view(bs, 1, seq1, -1).expand(-1, query_seq, -1, -1).reshape(bs * query_seq, seq1, -1)
+        # (bs * query_seq, 1, h) * (bs * query_seq, seq1, h)^T * (bs * query_seq, seq1, h)
+        # logger.info(query.size())
+        # logger.info(key_vec.size())
+        # logger.info(sentence_mask.size())
+        # (batch * q_seq, 1, h)
+        sentence_hidden, (_, _, _, scores) = self.sentence_attention(query, key_vec, word_hidden, sentence_mask)
+
+        if self.add_output:
+            sentence_hidden = self.output(sentence_hidden)
+        if self.residual:
+            sentence_hidden = sentence_hidden + query
+        if self.do_layer_norm:
+            sentence_hidden = self.LayerNorm(sentence_hidden)
+        if return_sentence_score:
+            return sentence_hidden.squeeze(1), scores
+        return sentence_hidden.squeeze(1)  # (batch * query_seq, h)
+
+
 # ===============================
 # Function
 # ===============================
+
+
+def negative_entropy(score, target, reduction='sum'):
+    """
+    :param score: [B, *]
+    :param target: [B, *]
+    :param reduction
+    :return:
+    """
+    # dtype = score.dtype
+    # log_score = torch.log_softmax(score.to(dtype=torch.float), dim=-1)
+    # loss = log_score[target].sum().to(dtype=dtype)
+    neg_score = 1 - score.softmax(dim=-1)
+    log_score = -torch.log(neg_score + 1e-6)
+    loss = log_score[target].sum()
+    # log_score = torch.log_softmax(score, dim=-1)
+    # loss = log_score[target].sum()
+    if reduction == 'mean':
+        loss = loss / score.size(0)
+    logger.debug(loss)
+    return loss
 
 
 def masked_log_softmax_fp16(vector: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -192,3 +317,8 @@ def dropout_mask(x, value, mask=None, p=0.):
     new_x = x.masked_fill(mask.byte(), value)
     return new_x
 
+
+def get_casual_mask(seq_length, device):
+    position_ids = torch.arange(seq_length, dtype=torch.long, device=device)
+    casual_mask = position_ids[None, None, :].repeat(1, seq_length, 1) <= position_ids[None, :, None]
+    return casual_mask

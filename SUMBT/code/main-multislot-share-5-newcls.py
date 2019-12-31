@@ -635,6 +635,13 @@ def main():
     parser.add_argument('--extra_dropout', type=float, default=-1.)
     parser.add_argument('--reverse', default=False, action='store_true')
     parser.add_argument('--weighted_cls', default=False, action='store_true')
+    parser.add_argument('--use_flow', default=False, action='store_true')
+    parser.add_argument('--flow_layer', default=100, type=int)
+    parser.add_argument('--flow_head', default=None, type=int)
+    parser.add_argument('--hie_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--hie_residual', default=False, action='store_true')
+    parser.add_argument('--hie_add_sup', default=0., type=float)
+    parser.add_argument('--max_grad_norm', default=1.0, type=float)
 
     args = parser.parse_args()
 
@@ -659,7 +666,7 @@ def main():
     tb_file_name = tb_file_name.replace('/', '-')
     cur_time = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     f_handler = logging.FileHandler(os.path.join(args.output_dir, f'{tb_file_name}-{cur_time}-output.log'))
-    f_handler.setLevel(logging.INFO)
+    f_handler.setLevel(logging.DEBUG)
     f_handler.setFormatter(logging.Formatter(fmt="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
                                              datefmt='%m/%d/%Y %H:%M:%S'))
     logger.addHandler(f_handler)
@@ -812,6 +819,12 @@ def main():
         from BeliefTracker_dstc import BeliefTracker
     elif args.nbt == 'fuse':
         from BeliefTrackerShareSA_fusion import BeliefTracker
+    elif args.nbt == 'flow':
+        from BeliefTrackerShareSA_flat_flow import BeliefTracker
+    elif args.nbt == 'flow2':
+        from BeliefTrackerShareSA_flat_flow2 import BeliefTracker
+    elif args.nbt == 'hie_fuse':
+        from BeliefTrackerShareSA_flat_hie_cls import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -864,7 +877,8 @@ def main():
         optimizer = BertAdam(optimizer_grouped_parameters,
                              lr=args.learning_rate,
                              warmup=args.warmup_proportion,
-                             t_total=t_total)
+                             t_total=t_total,
+                             max_grad_norm=args.max_grad_norm)
         if args.fp16:
             try:
                 from apex import amp

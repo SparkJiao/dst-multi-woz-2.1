@@ -1215,6 +1215,7 @@ def main():
             predictions = []
 
             for batch in tqdm(eval_dataloader, desc="Evaluating"):
+                batch = tuple(t.to(device) for t in batch)
                 # if input_ids.dim() == 2:
                 #     input_ids = input_ids.unsqueeze(0)
                 #     token_type_ids = token_type_ids.unsqueeze(0)

@@ -607,6 +607,14 @@ def main():
     parser.add_argument('--key_type', type=int, default=0)
     parser.add_argument('--self_attention_type', type=int, default=0)
     parser.add_argument('--cls_type', default=0, type=int)
+    parser.add_argument('--mask_self', default=False, action='store_true')
+    parser.add_argument('--remove_some_slot', default=False, action='store_true')
+    parser.add_argument('--extra_dropout', type=float, default=-1.)
+    parser.add_argument('--reverse', default=False, action='store_true')
+    parser.add_argument('--weighted_cls', default=False, action='store_true')
+    parser.add_argument('--use_flow', default=False, action='store_true')
+    parser.add_argument('--flow_layer', default=100, type=int)
+    parser.add_argument('--flow_head', default=None, type=int)
 
     args = parser.parse_args()
 
@@ -787,6 +795,8 @@ def main():
         from BeliefTrackerShareSA_cache_type_prop_fold_cls import BeliefTracker
     elif args.nbt == 'cache_combine':
         from BeliefTrackerShareSA_cls_cb import BeliefTracker
+    elif args.nbt == 'flow':
+        from BeliefTrackerShareSA_flat_flow import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
