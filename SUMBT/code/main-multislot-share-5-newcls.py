@@ -642,6 +642,10 @@ def main():
     parser.add_argument('--hie_residual', default=False, action='store_true')
     parser.add_argument('--hie_add_sup', default=0., type=float)
     parser.add_argument('--max_grad_norm', default=1.0, type=float)
+    parser.add_argument('--hie_wd_residual', default=False, action='store_true')
+    parser.add_argument('--hie_wd_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--hie_wd_add_output', default=False, action='store_true')
+    parser.add_argument('--gate_type', default=0, type=int)
 
     args = parser.parse_args()
 

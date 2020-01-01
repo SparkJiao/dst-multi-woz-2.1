@@ -95,8 +95,11 @@ class BeliefTracker(nn.Module):
 
         self.slot_inter = layers.HierarchicalAttention(nbt_config, add_output=True,
                                                        do_layer_norm=args.hie_add_layer_norm,
-                                                       residual=args.hie_residual)
-        self.slot_fusion = layers.DynamicFusion(self.bert_output_dim)
+                                                       residual=args.hie_residual,
+                                                       add_output2=args.hie_wd_add_output,
+                                                       do_layer_norm2=args.hie_wd_add_layer_norm,
+                                                       residual2=args.hie_wd_residual)
+        self.slot_fusion = layers.DynamicFusion(self.bert_output_dim, gate_type=args.gate_type)
 
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)

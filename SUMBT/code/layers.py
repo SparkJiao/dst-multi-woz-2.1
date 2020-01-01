@@ -154,11 +154,18 @@ class Attention(nn.Module):
 
 
 class DynamicFusion(nn.Module):
-    def __init__(self, input_size, act_fn=gelu):
+    def __init__(self, input_size, act_fn=gelu, gate_type=0):
         super(DynamicFusion, self).__init__()
         self.transform1 = nn.Linear(input_size, input_size)
         self.fuse_f = nn.Linear(input_size * 4, input_size)
-        self.gate_f = nn.Linear(input_size * 4, input_size)
+        logger.info(f'{self.__class__.__name__} parameters:')
+        logger.info(f'Gate type: {gate_type}')
+        if gate_type == 0:
+            self.gate_f = nn.Linear(input_size * 4, input_size)
+        elif gate_type == 1:
+            self.gate_f = nn.Linear(input_size * 4, 1)
+        else:
+            raise RuntimeError()
         self.act_fn = act_fn
 
     def forward(self, x, y):
@@ -177,7 +184,8 @@ class DynamicFusion(nn.Module):
 
 
 class HierarchicalAttention(nn.Module):
-    def __init__(self, config: BertConfig, add_output=False, residual=False, do_layer_norm=False):
+    def __init__(self, config: BertConfig, add_output=False, residual=False, do_layer_norm=False,
+                 add_output2=False, residual2=False, do_layer_norm2=False):
         super(HierarchicalAttention, self).__init__()
         logger.info(f'{self.__class__.__name__} parameters:')
         self.word_attention = MultiHeadAttention(config)
@@ -197,6 +205,18 @@ class HierarchicalAttention(nn.Module):
                                         nn.Dropout(config.hidden_dropout_prob))
             if self.do_layer_norm:
                 self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+
+        self.add_output2 = add_output2
+        self.residual2 = residual2
+        self.do_layer_norm2 = do_layer_norm2
+        logger.info(f'add output 2: {self.add_output2}')
+        logger.info(f'residual 2: {self.residual2}')
+        logger.info(f'do layer norm 2: {self.do_layer_norm2}')
+        if self.add_output2:
+            self.output2 = nn.Sequential(nn.Linear(config.hidden_size, config.hidden_size),
+                                         nn.Dropout(config.hidden_dropout_prob))
+            if self.do_layer_norm2:
+                self.w_LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -241,6 +261,13 @@ class HierarchicalAttention(nn.Module):
         # (batch * q_seq, seq1, h)
         word_hidden = word_hidden.permute(0, 2, 1, 3).reshape(bs, seq1, query_seq, -1).transpose(1, 2).reshape(
             bs * query_seq, seq1, -1)
+
+        if self.add_output2:
+            word_hidden = self.output2(word_hidden)
+        if self.residual2:
+            word_hidden = word_hidden + query.view(bs * query_seq, 1, -1)
+        if self.do_layer_norm2:
+            word_hidden = self.w_LayerNorm(word_hidden)
 
         if sentence_mask.dim() == 3:
             sentence_mask = sentence_mask[:, None, :, :]
