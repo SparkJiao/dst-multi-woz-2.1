@@ -59,6 +59,6 @@ python code/main-multislot-share-5-newcls.py --do_train --do_eval --num_train_ep
 --dev_file data/multiwoz2.1_5/dev-5-full-value.tsv \
 --test_file data/multiwoz2.1_5/test-5-full-value.tsv \
 --ontology data/multiwoz2.1_5/ontology-full.json \
---cls_type 1 --hie_add_sup 0.01 --max_grad_norm 1.0 --gate_type 1 \
+--cls_type 1 --hie_add_sup 0.1 --max_grad_norm 1.0 --gate_type 1 \
 --hie_add_layer_norm --hie_residual \
 --pretrain $output_dir/pytorch_model_loss.bin
