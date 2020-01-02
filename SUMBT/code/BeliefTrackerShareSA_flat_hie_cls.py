@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 from torch.nn import CrossEntropyLoss
+from allennlp.training.metrics import Average, Metric
 
 try:
     from . import layers
@@ -127,7 +128,26 @@ class BeliefTracker(nn.Module):
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
         logger.info(f"If add hierarchical attention supervision: {args.hie_add_sup}")
-        self.add_sup = args.hie_add_sup
+        self.register_buffer("add_sup", torch.tensor(args.hie_add_sup))
+        # self.add_sup = args.hie_add_sup
+        logger.info(f'Classification loss weight: {args.cls_loss_weight}')
+        self.cls_loss_weight = args.cls_loss_weight
+
+        # Metric
+        self.metrics = {
+            "cls_loss": {
+                "train": Average(),
+                "eval": Average(),
+            },
+            "matching_loss": {
+                "train": Average(),
+                "eval": Average(),
+            },
+            "slot_negative_loss": {
+                "train": Average(),
+                "eval": Average()
+            }
+        }
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -238,10 +258,13 @@ class BeliefTracker(nn.Module):
             slot_target[self_mask.to(dtype=torch.bool)] = -1
             loss = self.add_sup * layers.negative_entropy(score=slot_score.squeeze(2), target=(slot_target == 0)) / (
                     ds * self.bert_config.num_attention_heads)
+            self.update_metric("slot_negative_loss", loss.item())
 
         loss_slot = []
         pred_slot = []
         output = []
+        type_loss = 0.
+        matching_loss = 0.
         for s, slot_id in enumerate(target_slot):  # note: target_slots are successive
             # loss calculation
             hid_label = self.value_lookup[slot_id].weight
@@ -270,6 +293,7 @@ class BeliefTracker(nn.Module):
 
                 _loss = self.nll(_dist.view(ds * ts, -1), masked_slot_labels_for_loss.view(-1)) / (ds * 1.0)
                 loss_slot.append(_loss.item())
+                matching_loss += _loss.item()
                 loss += _loss
 
             if answer_type_ids is not None:
@@ -278,10 +302,15 @@ class BeliefTracker(nn.Module):
                 else:
                     cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 loss_slot[-1] += cls_loss.item()
+                cls_loss = cls_loss * self.cls_loss_weight
+                type_loss += cls_loss.item()
                 loss += cls_loss
 
         if labels is None:
             return output
+
+        self.update_metric("cls_loss", type_loss)
+        self.update_metric("matching_loss", matching_loss)
 
         # calculate joint accuracy
         pred_slot = torch.cat(pred_slot, 2)  # (ds, ts, slot_dim)
@@ -323,3 +352,14 @@ class BeliefTracker(nn.Module):
             torch.nn.init.xavier_normal_(module.weight_hh_l0)
             torch.nn.init.constant_(module.bias_ih_l0, 0.0)
             torch.nn.init.constant_(module.bias_hh_l0, 0.0)
+
+    def update_metric(self, metric_name, *args, **kwargs):
+        state = 'train' if self.training else 'eval'
+        self.metrics[metric_name][state](*args, **kwargs)
+
+    def get_metric(self, reset=False):
+        state = 'train' if self.training else 'eval'
+        metrics = {}
+        for k, v in self.metrics.items():
+            metrics[k] = v[state].get_metric(reset=reset)
+        return metrics

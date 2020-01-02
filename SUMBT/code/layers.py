@@ -306,17 +306,18 @@ def negative_entropy(score, target, reduction='sum'):
     :param reduction
     :return:
     """
-    # dtype = score.dtype
+    dtype = score.dtype
     # log_score = torch.log_softmax(score.to(dtype=torch.float), dim=-1)
     # loss = log_score[target].sum().to(dtype=dtype)
-    neg_score = 1 - score.softmax(dim=-1)
+    neg_score = 1 - score.to(dtype=torch.float).softmax(dim=-1)
+    # log_score = -torch.log(neg_score + 1e-6)
     log_score = -torch.log(neg_score + 1e-6)
-    loss = log_score[target].sum()
+    loss = log_score[target].sum().to(dtype=dtype)
     # log_score = torch.log_softmax(score, dim=-1)
     # loss = log_score[target].sum()
     if reduction == 'mean':
         loss = loss / score.size(0)
-    logger.debug(loss)
+    logger.debug(loss.item())
     return loss
 
 

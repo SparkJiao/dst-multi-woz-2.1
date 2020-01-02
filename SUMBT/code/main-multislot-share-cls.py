@@ -615,6 +615,15 @@ def main():
     parser.add_argument('--use_flow', default=False, action='store_true')
     parser.add_argument('--flow_layer', default=100, type=int)
     parser.add_argument('--flow_head', default=None, type=int)
+    parser.add_argument('--hie_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--hie_residual', default=False, action='store_true')
+    parser.add_argument('--hie_add_sup', default=0., type=float)
+    parser.add_argument('--max_grad_norm', default=1.0, type=float)
+    parser.add_argument('--hie_wd_residual', default=False, action='store_true')
+    parser.add_argument('--hie_wd_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--hie_wd_add_output', default=False, action='store_true')
+    parser.add_argument('--gate_type', default=0, type=int)
+    parser.add_argument('--cls_loss_weight', default=1., type=float)
 
     args = parser.parse_args()
 
@@ -797,6 +806,10 @@ def main():
         from BeliefTrackerShareSA_cls_cb import BeliefTracker
     elif args.nbt == 'flow':
         from BeliefTrackerShareSA_flat_flow import BeliefTracker
+    elif args.nbt == 'flow2':
+        from BeliefTrackerShareSA_flat_flow2 import BeliefTracker
+    elif args.nbt == 'hie_fuse':
+        from BeliefTrackerShareSA_flat_hie_cls import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

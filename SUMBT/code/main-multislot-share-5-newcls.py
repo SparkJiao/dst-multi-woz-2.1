@@ -646,6 +646,7 @@ def main():
     parser.add_argument('--hie_wd_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--hie_wd_add_output', default=False, action='store_true')
     parser.add_argument('--gate_type', default=0, type=int)
+    parser.add_argument('--cls_loss_weight', default=1., type=float)
 
     args = parser.parse_args()
 
@@ -969,6 +970,10 @@ def main():
                                                           global_step)
                                 summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
                                                           global_step)
+                            if hasattr(model, "get_metric"):
+                                metric = model.get_metric(reset=False)
+                                for k, v in metric.items():
+                                    summary_writer.add_scalar(f"Train/{k}", v, global_step)
 
                     optimizer.step()
                     optimizer.zero_grad()
@@ -1053,6 +1058,10 @@ def main():
                                                   global_step)
                         summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
                                                   global_step)
+                    if hasattr(model, "get_metric"):
+                        metric = model.get_metric(reset=True)
+                        for k, v in metric.items():
+                            summary_writer.add_scalar(f"Validate/{k}", v, global_step)
 
             dev_loss = round(dev_loss, 6)
             # if last_update is None or dev_loss < best_loss:
@@ -1257,6 +1266,10 @@ def main():
 
             with open(os.path.join(args.output_dir, f"predictions_{state_name}.json"), 'w') as f:
                 json.dump(predictions, f, indent=2)
+
+            if hasattr(model, "get_metric"):
+                with open(os.path.join(args.output_dir, f"eval_metric_{state_name}.json"), 'w') as f:
+                    json.dump(model.get_metric(reset=False), f, indent=2)
 
             out_file_name = f'eval_all_accuracies_{state_name}'
             with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
