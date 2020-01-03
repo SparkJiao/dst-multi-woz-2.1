@@ -102,6 +102,11 @@ class BeliefTracker(nn.Module):
                                                        residual2=args.hie_wd_residual)
         self.slot_fusion = layers.DynamicFusion(self.bert_output_dim, gate_type=args.gate_type)
 
+        logger.info(f'If add hidden output: {args.hidden_output}')
+        self.hidden_output = args.hidden_output
+        if self.hidden_output:
+            self.hidden_w = nn.Linear(self.bert_output_dim, self.bert_output_dim)
+
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
         elif args.cls_type == 1:
@@ -247,6 +252,9 @@ class BeliefTracker(nn.Module):
 
         answer_type_logits = self.classifier(hidden)
         _, answer_type_pred = answer_type_logits.max(dim=-1)
+
+        if self.hidden_output:
+            hidden = self.hidden_w(hidden)
 
         # Label (slot-value) encoding
         loss = 0

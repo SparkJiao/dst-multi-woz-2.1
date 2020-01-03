@@ -647,6 +647,7 @@ def main():
     parser.add_argument('--hie_wd_add_output', default=False, action='store_true')
     parser.add_argument('--gate_type', default=0, type=int)
     parser.add_argument('--cls_loss_weight', default=1., type=float)
+    parser.add_argument('--hidden_output', default=False, action='store_true')
 
     args = parser.parse_args()
 
