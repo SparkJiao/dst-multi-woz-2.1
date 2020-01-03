@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #output_dir=exp-multiwoz/data2.1-cls-hie-mt/v1.0
-output_dir=exp-multiwoz/data2.1-cls-hie-mt/v1.1  # --hie_add_sup 0.02
+output_dir=exp-multiwoz/data2.1-cls-hie-mt/v1.1  # --hie_add_sup 0.2
 target_slot='all'
 nbt='hie_mt'
 bert_dir='/home/jiaofangkai/'
@@ -18,4 +18,4 @@ python code/main-multislot-share-5-newcls.py --do_train --do_eval --num_train_ep
 --dev_file data/multiwoz2.1_5/dev-5-full-value.tsv \
 --test_file data/multiwoz2.1_5/test-5-full-value.tsv \
 --ontology data/multiwoz2.1_5/ontology-full.json \
---hie_add_sup 0.02 --max_grad_norm 1.0
+--hie_add_sup 0.2 --max_grad_norm 1.0

@@ -328,7 +328,7 @@ class BeliefTracker(nn.Module):
 
                 f_cls_loss = 0.5 * self.nll(f_answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 f_type_loss += f_cls_loss.item()
-                loss += f_type_loss
+                loss += f_cls_loss
 
         if labels is None:
             return output
