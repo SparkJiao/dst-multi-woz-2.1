@@ -3,7 +3,8 @@
 #output_dir=exp-multiwoz/data2.1-cls-hie/v1.0
 #output_dir=exp-multiwoz/data2.1-cls-hie/v2.0  # --hie_add_sup 0.8
 #output_dir=exp-multiwoz/data2.1-cls-hie/v2.1  # --hie_add_sup 0.8 --max_grad_norm 2.0 -> 1.0 去掉额外loss里的slot_dim系数
-output_dir=exp-multiwoz/data2.1-cls-hie/v2.1-f  # Fix bug. See `FIXME` in model file
+#output_dir=exp-multiwoz/data2.1-cls-hie/v2.1-f  # Fix bug. See `FIXME` in model file
+output_dir=exp-multiwoz/data2.1-cls-hie/v2.1-weight1.3  # hie_add_sup 0.02
 target_slot='all'
 nbt='hie_fuse'
 bert_dir='/home/jiaofangkai/'
@@ -20,4 +21,4 @@ python code/main-multislot-share-5-newcls.py --do_train --do_eval --num_train_ep
 --dev_file data/multiwoz2.1_5/dev-5-full-value.tsv \
 --test_file data/multiwoz2.1_5/test-5-full-value.tsv \
 --ontology data/multiwoz2.1_5/ontology-full.json \
---cls_type 1 --hie_add_sup 0.8 --max_grad_norm 1.0
+--cls_type 1 --hie_add_sup 0.02

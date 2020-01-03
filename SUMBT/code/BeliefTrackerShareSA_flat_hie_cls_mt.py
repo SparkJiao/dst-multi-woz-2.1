@@ -3,7 +3,7 @@ from logging import Logger
 
 import torch
 import torch.nn as nn
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel, gelu
 from torch.nn import CrossEntropyLoss
 from allennlp.training.metrics import Average, Metric
 
@@ -102,17 +102,12 @@ class BeliefTracker(nn.Module):
                                                        residual2=args.hie_wd_residual)
         self.slot_fusion = layers.DynamicFusion(self.bert_output_dim, gate_type=args.gate_type)
 
-        logger.info(f'If add hidden output: {args.hidden_output}')
-        self.hidden_output = args.hidden_output
-        if self.hidden_output:
-            self.hidden_w = nn.Linear(self.bert_output_dim, self.bert_output_dim)
+        self.hidden_w = nn.Linear(self.bert_output_dim, self.bert_output_dim)
 
-        if args.cls_type == 0:
-            self.classifier = nn.Linear(self.bert_output_dim, 3)
-        elif args.cls_type == 1:
-            self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
-                                            nn.Tanh(),
-                                            nn.Linear(self.bert_output_dim, 3))
+        self.transform1 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
+        self.transform2 = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+        self.fusion_classifier = nn.Linear(self.bert_output_dim, 3)
+        self.classifier = nn.Linear(self.bert_output_dim, 3)
 
         # Measure
         self.distance_metric = args.distance_metric
@@ -123,7 +118,7 @@ class BeliefTracker(nn.Module):
         elif self.distance_metric == 'product':
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
-        # Classifier
+        # CrossEntropy
         self.weighted_nll = CrossEntropyLoss(ignore_index=-1, reduction='sum', weight=torch.tensor([0.1, 0.5, 2],
                                                                                                    dtype=torch.float))
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
@@ -149,6 +144,14 @@ class BeliefTracker(nn.Module):
                 "eval": Average(),
             },
             "slot_negative_loss": {
+                "train": Average(),
+                "eval": Average()
+            },
+            "fusion_cls_joint_acc": {
+                "train": Average(),
+                "eval": Average()
+            },
+            "fusion_cls_loss": {
                 "train": Average(),
                 "eval": Average()
             }
@@ -234,7 +237,6 @@ class BeliefTracker(nn.Module):
             slot_dim * ds * self.max_slot_length, ts, -1)
 
         # NBT
-        # hidden = self.transformer(hidden, None).view(slot_dim, ds, ts, -1)
         # [bs, slot_dim, max_slot_length, h]
         hidden = self.transformer(hidden, None).view(slot_dim * ds, self.max_slot_length, ts, -1).transpose(1, 2).reshape(
             slot_dim, bs, self.max_slot_length, -1).transpose(0, 1).contiguous()
@@ -248,13 +250,18 @@ class BeliefTracker(nn.Module):
                                                   word_mask, self_mask, return_sentence_score=True)
         slot_hidden = slot_hidden.view(bs, slot_dim, -1)
 
+        slot_transform1 = gelu(self.transform1(slot_hidden)).view(ds, ts, slot_dim, -1).permute(2, 0, 1, 3)
+        f_answer_type_logits = self.fusion_classifier(slot_transform1)
+        _, f_answer_type_pred = f_answer_type_logits.max(dim=-1)
+
         hidden = self.slot_fusion(hidden[:, :, 0], slot_hidden).transpose(0, 1).reshape(slot_dim, ds, ts, -1)
 
-        answer_type_logits = self.classifier(hidden)
+        transform2 = gelu(self.transform2(torch.cat([slot_transform1, hidden], dim=-1)))
+
+        answer_type_logits = self.classifier(transform2)
         _, answer_type_pred = answer_type_logits.max(dim=-1)
 
-        if self.hidden_output:
-            hidden = self.hidden_w(hidden)
+        hidden = self.hidden_w(hidden)
 
         # Label (slot-value) encoding
         loss = 0
@@ -266,6 +273,7 @@ class BeliefTracker(nn.Module):
             #  The `self_mask` mask or values except the slot itself. Should be `1 - self_mask`
             # self_mask = self_mask[:, None, :].expand(-1, slot_score.size(1), -1)
             self_mask = 1 - self_mask[:, None, :].expand(-1, slot_score.size(1), -1)
+            assert self_mask[:, 0, :].sum() == bs * slot_dim, self_mask[:, 0, :]
             slot_target[self_mask.to(dtype=torch.bool)] = -1
             loss = self.add_sup * layers.negative_entropy(score=slot_score.squeeze(2), target=(slot_target == 0)) / (
                     ds * self.bert_config.num_attention_heads)
@@ -275,6 +283,7 @@ class BeliefTracker(nn.Module):
         pred_slot = []
         output = []
         type_loss = 0.
+        f_type_loss = 0.
         matching_loss = 0.
         for s, slot_id in enumerate(target_slot):  # note: target_slots are successive
             # loss calculation
@@ -317,11 +326,16 @@ class BeliefTracker(nn.Module):
                 type_loss += cls_loss.item()
                 loss += cls_loss
 
+                f_cls_loss = 0.5 * self.nll(f_answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
+                f_type_loss += f_cls_loss.item()
+                loss += f_type_loss
+
         if labels is None:
             return output
 
         self.update_metric("cls_loss", type_loss)
         self.update_metric("matching_loss", matching_loss)
+        self.update_metric("fusion_cls_loss", f_type_loss)
 
         # calculate joint accuracy
         pred_slot = torch.cat(pred_slot, 2)  # (ds, ts, slot_dim)
@@ -342,9 +356,11 @@ class BeliefTracker(nn.Module):
         acc = sum(torch.sum(accuracy, dim=1) // slot_dim).float() / valid_turn
         type_acc = sum(torch.sum(answer_type_accuracy, dim=1) // slot_dim).float() / valid_turn
 
-        # accuracy = (pred_slot == labels).view(-1, slot_dim)
-        # acc_slot = torch.sum(accuracy, 0).float() / torch.sum(labels.view(-1, slot_dim) > -1, 0).float()
-        # acc = sum(torch.sum(accuracy, 1) / slot_dim).float() / torch.sum(labels[:, :, 0].view(-1) > -1, 0).float()  # joint accuracy
+        # fusion joint accuracy
+        f_type_acc = (f_answer_type_pred.permute(1, 2, 0).detach() == answer_type_ids).view(-1, slot_dim)
+        f_type_acc = sum(torch.sum(f_type_acc, dim=1) // slot_dim).float()
+        self.update_metric("fusion_cls_joint_acc", f_type_acc.item())
+        self.metrics["fusion_cls_joint_acc"]["train" if self.training else "eval"]._count += (valid_turn - 1)
 
         if n_gpu == 1:
             return loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, torch.cat(

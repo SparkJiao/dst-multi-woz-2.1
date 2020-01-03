@@ -67,10 +67,25 @@ class ProjectionTransform(nn.Module):
     def forward(self, x, y, return_h2=False):
         h1 = self.act_fn(self.transform1(x))
         h2 = self.act_fn(self.transform2(torch.cat([y, h1], dim=-1)))
+        # if return_h2:
+        #     return h2
+        res = self.transform3(h2)
         if return_h2:
-            return h2
-        vec_l = self.transform3(h2)
-        return vec_l
+            return res, h2
+        return res
+
+
+class SimpleTransform(nn.Module):
+    def __init__(self, input_dim, act_fn=gelu):
+        super(SimpleTransform, self).__init__()
+        self.transform1 = nn.Linear(input_dim, input_dim)
+        self.transform2 = nn.Linear(input_dim * 2, input_dim)
+        self.act_fn = act_fn
+
+    def forward(self, x, y):
+        h1 = self.act_fn(self.transform1(x))
+        h2 = self.act_fn(self.transform2(torch.cat([y, h1], dim=-1)))
+        return h2
 
 
 class MultiHeadAttention(nn.Module):
@@ -293,6 +308,51 @@ class HierarchicalAttention(nn.Module):
             return sentence_hidden.squeeze(1), scores
         return sentence_hidden.squeeze(1)  # (batch * query_seq, h)
 
+
+class SimpleHierarchicalAttention(nn.Module):
+    def __init__(self, dropout):
+        super(SimpleHierarchicalAttention, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, query, key, value, key_vec, word_mask, sentence_mask=None, return_sentence_score=False):
+        """
+        :param query: [batch, seq_len1, h]
+        :param key: [batch, seq_len1, seq_len2, h]
+        :param value: [batch, seq_len1, seq_len2, h]
+        :param key_vec: [batch, seq_len1, h]
+        :param word_mask: [batch, seq_len1, seq_len2]
+        :param sentence_mask: [batch * seq_len1, seq_len1]
+        :param return_sentence_score
+        :return:
+        """
+        word_mask = (1 - word_mask.to(dtype=query.dtype)) * -10000.0
+        sentence_mask = (1 - sentence_mask.to(dtype=query.dtype)) * -10000.0 if sentence_mask is not None else \
+            key.new_zeros(key_vec.size(0) * key_vec.size(1), key_vec.size(1))
+        # if sentence_mask.dim() == 2:
+        #     sentence_mask = sentence_mask[:, None, :]
+
+        bs, seq1, seq2, _ = key.size()
+        query_seq = query.size(1)
+        flat_key = key.view(bs, seq1 * seq2, -1)
+        value = value.view(bs * seq1, seq2, -1)
+
+        # (bs, q_seq, seq1 * seq2) -> (bs * seq1, q_seq, seq2)
+        word_scores = query.bmm(flat_key.transpose(-1, -2)).reshape(
+            bs, query_seq, seq1, seq2).transpose(1, 2).reshape(bs * seq1, query_seq, seq2)
+        word_scores = word_scores + word_mask.view(bs * seq1, 1, seq2)
+        # (bs * seq1, query_seq, h) -> (bs * query_seq, seq1, h)
+        word_hidden = self.dropout(torch.softmax(word_scores, dim=-1)).bmm(value).reshape(
+            bs, seq1, query_seq, -1).transpose(1, 2).reshape(bs * query_seq, seq1, -1)
+
+        # (bs * query_seq, seq1)
+        sent_score = query.bmm(key_vec.transpose(-1, -2)).view(bs * query_seq, seq1)
+        sent_prob = torch.softmax(sent_score + sentence_mask, dim=-1).unsqueeze(1)
+
+        sentence_hidden = self.dropout(sent_prob).bmm(word_hidden)
+
+        if return_sentence_score:
+            return sentence_hidden.squeeze(1), sent_score
+        return sentence_hidden.squeeze(1)  # (batch * query_seq, h)
 
 # ===============================
 # Function

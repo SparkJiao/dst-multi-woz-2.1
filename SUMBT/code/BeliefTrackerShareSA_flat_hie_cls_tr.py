@@ -100,19 +100,9 @@ class BeliefTracker(nn.Module):
                                                        add_output2=args.hie_wd_add_output,
                                                        do_layer_norm2=args.hie_wd_add_layer_norm,
                                                        residual2=args.hie_wd_residual)
-        self.slot_fusion = layers.DynamicFusion(self.bert_output_dim, gate_type=args.gate_type)
 
-        logger.info(f'If add hidden output: {args.hidden_output}')
-        self.hidden_output = args.hidden_output
-        if self.hidden_output:
-            self.hidden_w = nn.Linear(self.bert_output_dim, self.bert_output_dim)
-
-        if args.cls_type == 0:
-            self.classifier = nn.Linear(self.bert_output_dim, 3)
-        elif args.cls_type == 1:
-            self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
-                                            nn.Tanh(),
-                                            nn.Linear(self.bert_output_dim, 3))
+        self.transform = layers.ProjectionTransform(self.bert_output_dim, 3)
+        self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim)
 
         # Measure
         self.distance_metric = args.distance_metric
@@ -246,15 +236,15 @@ class BeliefTracker(nn.Module):
         # (bs * slot_dim, -1), slot_score: (bs * slot_dim(q_seq), num_head, 1, slot_dim)
         slot_hidden, slot_score = self.slot_inter(hidden[:, :, 0], hidden, hidden, hidden[:, :, 0],
                                                   word_mask, self_mask, return_sentence_score=True)
-        slot_hidden = slot_hidden.view(bs, slot_dim, -1)
 
-        hidden = self.slot_fusion(hidden[:, :, 0], slot_hidden).transpose(0, 1).reshape(slot_dim, ds, ts, -1)
+        slot_hidden = slot_hidden.view(bs, slot_dim, -1).transpose(0, 1)
+        hidden = hidden.transpose(0, 1)[:, :, 0]
 
-        answer_type_logits = self.classifier(hidden)
+        answer_type_logits, hidden = self.transform(hidden, slot_hidden, return_h2=True)
+        answer_type_logits = answer_type_logits.view(slot_dim, ds, ts, 3)
+        hidden = self.hidden_output(hidden).view(slot_dim, ds, ts, self.bert_output_dim)
+
         _, answer_type_pred = answer_type_logits.max(dim=-1)
-
-        if self.hidden_output:
-            hidden = self.hidden_w(hidden)
 
         # Label (slot-value) encoding
         loss = 0

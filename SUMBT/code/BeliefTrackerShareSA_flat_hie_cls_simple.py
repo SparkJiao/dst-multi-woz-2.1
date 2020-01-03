@@ -94,18 +94,14 @@ class BeliefTracker(nn.Module):
             logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
-        self.slot_inter = layers.HierarchicalAttention(nbt_config, add_output=True,
-                                                       do_layer_norm=args.hie_add_layer_norm,
-                                                       residual=args.hie_residual,
-                                                       add_output2=args.hie_wd_add_output,
-                                                       do_layer_norm2=args.hie_wd_add_layer_norm,
-                                                       residual2=args.hie_wd_residual)
-        self.slot_fusion = layers.DynamicFusion(self.bert_output_dim, gate_type=args.gate_type)
+        self.slot_inter = layers.SimpleHierarchicalAttention(dropout=self.hidden_dropout_prob)
 
-        logger.info(f'If add hidden output: {args.hidden_output}')
-        self.hidden_output = args.hidden_output
-        if self.hidden_output:
-            self.hidden_w = nn.Linear(self.bert_output_dim, self.bert_output_dim)
+        self.fusion_type = args.gate_type
+        logger.info(f'Fusion type: {args.gate_type}')
+        if self.fusion_type == 0:
+            self.slot_fusion = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+        elif self.fusion_type == 1:
+            self.slot_fusion = layers.SimpleTransform(self.bert_output_dim)
 
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
@@ -113,6 +109,8 @@ class BeliefTracker(nn.Module):
             self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
                                             nn.Tanh(),
                                             nn.Linear(self.bert_output_dim, 3))
+
+        self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim)
 
         # Measure
         self.distance_metric = args.distance_metric
@@ -243,32 +241,31 @@ class BeliefTracker(nn.Module):
         word_mask = self.slot_mask.unsqueeze(0).expand(bs, -1, -1)
         word_mask[:, :, 0] = 0  # mask [CLS] tokens
         self_mask = self.slot_diag_mask.unsqueeze(0).expand(bs, -1, -1).reshape(bs * slot_dim, slot_dim)
-        # (bs * slot_dim, -1), slot_score: (bs * slot_dim(q_seq), num_head, 1, slot_dim)
+        # (bs * slot_dim, -1), slot_score: (bs * slot_dim(q_seq), slot_dim)
         slot_hidden, slot_score = self.slot_inter(hidden[:, :, 0], hidden, hidden, hidden[:, :, 0],
                                                   word_mask, self_mask, return_sentence_score=True)
         slot_hidden = slot_hidden.view(bs, slot_dim, -1)
 
-        hidden = self.slot_fusion(hidden[:, :, 0], slot_hidden).transpose(0, 1).reshape(slot_dim, ds, ts, -1)
+        if self.fusion_type == 0:
+            hidden = self.slot_fusion(torch.cat([slot_hidden, hidden[:, :, 0]], dim=-1))
+        else:
+            hidden = self.slot_fusion(slot_hidden, hidden[:, :, 0])
+        # hidden = self.slot_fusion(slot_hidden, hidden[:, :, 0]).transpose(0, 1).reshape(slot_dim, ds, ts, -1)
+        hidden = hidden.transpose(0, 1).reshape(slot_dim, ds, ts, -1)
 
         answer_type_logits = self.classifier(hidden)
         _, answer_type_pred = answer_type_logits.max(dim=-1)
 
-        if self.hidden_output:
-            hidden = self.hidden_w(hidden)
+        hidden = self.hidden_output(hidden)
 
         # Label (slot-value) encoding
         loss = 0
 
         if self.add_sup > 0:
-            slot_target = answer_type_ids.view(bs, 1, 1, slot_dim).expand(
-                -1, slot_dim, slot_score.size(1), -1).reshape(bs * slot_dim, -1, slot_dim)
-            # FIXME: Find bug here.
-            #  The `self_mask` mask or values except the slot itself. Should be `1 - self_mask`
+            slot_target = answer_type_ids.view(bs, 1, slot_dim).expand(-1, slot_dim, -1).reshape(bs * slot_dim, slot_dim)
             # self_mask = self_mask[:, None, :].expand(-1, slot_score.size(1), -1)
-            self_mask = 1 - self_mask[:, None, :].expand(-1, slot_score.size(1), -1)
-            slot_target[self_mask.to(dtype=torch.bool)] = -1
-            loss = self.add_sup * layers.negative_entropy(score=slot_score.squeeze(2), target=(slot_target == 0)) / (
-                    ds * self.bert_config.num_attention_heads)
+            # slot_target[self_mask.to(dtype=torch.bool)] = -1
+            loss = self.add_sup * layers.negative_entropy(score=slot_score, target=(slot_target != 2)) / ds
             self.update_metric("slot_negative_loss", loss.item())
 
         loss_slot = []

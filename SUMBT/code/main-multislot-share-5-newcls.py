@@ -831,6 +831,12 @@ def main():
         from BeliefTrackerShareSA_flat_flow2 import BeliefTracker
     elif args.nbt == 'hie_fuse':
         from BeliefTrackerShareSA_flat_hie_cls import BeliefTracker
+    elif args.nbt == 'hie_tr':
+        from BeliefTrackerShareSA_flat_hie_cls_tr import BeliefTracker
+    elif args.nbt == 'hie_simple':
+        from BeliefTrackerShareSA_flat_hie_cls_simple import BeliefTracker
+    elif args.nbt == 'hie_mt':
+        from BeliefTrackerShareSA_flat_hie_cls_mt import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
