@@ -360,7 +360,7 @@ class BeliefTracker(nn.Module):
         f_type_acc = (f_answer_type_pred.permute(1, 2, 0).detach() == answer_type_ids).view(-1, slot_dim)
         f_type_acc = sum(torch.sum(f_type_acc, dim=1) // slot_dim).float()
         self.update_metric("fusion_cls_joint_acc", f_type_acc.item())
-        self.metrics["fusion_cls_joint_acc"]["train" if self.training else "eval"]._count += (valid_turn - 1)
+        self.metrics["fusion_cls_joint_acc"]["train" if self.training else "eval"]._count += (valid_turn - 1).item()
 
         if n_gpu == 1:
             return loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, torch.cat(

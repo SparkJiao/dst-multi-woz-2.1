@@ -6,7 +6,7 @@ target_slot='all'
 nbt='hie_mt'
 bert_dir='/home/jiaofangkai/'
 
-python code/main-multislot-share-5-newcls.py --do_train --do_eval --num_train_epochs 6 --data_dir data/multiwoz2.1_5 \
+python code/main-multislot-share-5-newcls.py --do_eval --num_train_epochs 6 --data_dir data/multiwoz2.1_5 \
 --bert_model bert-base-uncased --do_lower_case --bert_dir $bert_dir --task_name bert-gru-sumbt \
 --nbt $nbt --output_dir $output_dir --target_slot $target_slot --warmup_proportion 0.1 --learning_rate 5e-5 \
 --train_batch_size 1 --eval_batch_size 1 --distance_metric product --patience 5 \
