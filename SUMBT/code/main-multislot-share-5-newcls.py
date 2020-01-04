@@ -829,6 +829,8 @@ def main():
         from BeliefTrackerShareSA_flat_flow import BeliefTracker
     elif args.nbt == 'flow2':
         from BeliefTrackerShareSA_flat_flow2 import BeliefTracker
+    elif args.nbt == 'flow3':
+        from BeliefTrackerShareSA_flat_flow3 import BeliefTracker
     elif args.nbt == 'hie_fuse':
         from BeliefTrackerShareSA_flat_hie_cls import BeliefTracker
     elif args.nbt == 'hie_tr':

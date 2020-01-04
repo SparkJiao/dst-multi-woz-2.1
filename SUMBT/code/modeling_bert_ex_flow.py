@@ -566,7 +566,8 @@ class BertEncoder(nn.Module):
         layer = BertLayer(config)
         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None, flow_layer=100, **kwargs):
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None, flow_layer=100,
+                dialog_position_encoding=None, dialog_position_layer_norm=None, **kwargs):
         all_encoder_layers = []
         attn_caches = []
         for layer_index, layer_module in enumerate(self.layer):
@@ -575,6 +576,8 @@ class BertEncoder(nn.Module):
             else:
                 attn_cache = None
             if layer_index >= flow_layer:
+                if layer_index == flow_layer and dialog_position_encoding is not None and dialog_position_layer_norm is not None:
+                    hidden_states = dialog_position_layer_norm(hidden_states + dialog_position_encoding)
                 use_flow = True
             else:
                 use_flow = False
