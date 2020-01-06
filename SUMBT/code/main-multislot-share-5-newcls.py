@@ -579,6 +579,7 @@ def main():
                         default=3.0,
                         type=float,
                         help="Total number of training epochs to perform.")
+    parser.add_argument('--per_eval_steps', type=int, default=2000, help='Per steps for evaluation')
     parser.add_argument("--patience",
                         default=10.0,
                         type=float,
@@ -648,6 +649,7 @@ def main():
     parser.add_argument('--gate_type', default=0, type=int)
     parser.add_argument('--cls_loss_weight', default=1., type=float)
     parser.add_argument('--hidden_output', default=False, action='store_true')
+    parser.add_argument('--dropout', default=None, type=float)
 
     args = parser.parse_args()
 
@@ -839,6 +841,8 @@ def main():
         from BeliefTrackerShareSA_flat_hie_cls_simple import BeliefTracker
     elif args.nbt == 'hie_mt':
         from BeliefTrackerShareSA_flat_hie_cls_mt import BeliefTracker
+    elif args.nbt == 'flow_hie':
+        from BeliefTrackerShareSA_flat_flow_hie import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -935,6 +939,8 @@ def main():
             nb_tr_steps = 0
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
+                model.train()
+
                 batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
                 input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
 
@@ -988,135 +994,137 @@ def main():
                     optimizer.zero_grad()
                     global_step += 1
 
-            # Perform evaluation on validation dataset
-            model.eval()
-            dev_loss = 0
-            dev_acc = 0
-            dev_type_acc = 0
-            dev_loss_slot, dev_acc_slot, dev_acc_slot_type = None, None, None
-            nb_dev_examples, nb_dev_steps = 0, 0
+                    if global_step % args.per_eval_steps == 0:
 
-            for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
-                batch = tuple(t.to(device) for t in batch)
-                input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
-                batch_size = input_ids.size(0)
-                if input_ids.dim() == 2:
-                    input_ids = input_ids.unsqueeze(0)
-                    token_type_ids = token_type_ids.unsqueeze(0)
-                    input_mask = input_mask.unsqueeze(0)
-                    answer_type_ids = answer_type_ids.unsqueeze(0)
-                    label_ids = label_ids.unsuqeeze(0)
+                        # Perform evaluation on validation dataset
+                        model.eval()
+                        dev_loss = 0
+                        dev_acc = 0
+                        dev_type_acc = 0
+                        dev_loss_slot, dev_acc_slot, dev_acc_slot_type = None, None, None
+                        nb_dev_examples, nb_dev_steps = 0, 0
 
-                with torch.no_grad():
-                    if n_gpu == 1:
-                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, _ \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
-                    else:
-                        loss, _, acc, type_acc, acc_slot, type_acc_slot, _ \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        for _, eval_batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
+                            eval_batch = tuple(t.to(device) for t in eval_batch)
+                            input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = eval_batch
+                            batch_size = input_ids.size(0)
+                            if input_ids.dim() == 2:
+                                input_ids = input_ids.unsqueeze(0)
+                                token_type_ids = token_type_ids.unsqueeze(0)
+                                input_mask = input_mask.unsqueeze(0)
+                                answer_type_ids = answer_type_ids.unsqueeze(0)
+                                label_ids = label_ids.unsuqeeze(0)
 
-                        # average to multi-gpus
-                        loss = loss.mean()
-                        acc = acc.mean()
-                        acc_slot = acc_slot.mean(0)
+                            with torch.no_grad():
+                                if n_gpu == 1:
+                                    loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, _ \
+                                        = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                                else:
+                                    loss, _, acc, type_acc, acc_slot, type_acc_slot, _ \
+                                        = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
 
-                num_valid_turn = torch.sum(answer_type_ids[:, :, 0].view(-1) > -1,
-                                           0).item()  # valid turns for all current batch
-                # dev_loss += loss.item() * num_valid_turn
-                dev_acc += acc.item() * num_valid_turn
-                dev_loss += loss.item() * batch_size
-                dev_type_acc += type_acc.item() * num_valid_turn
-                # dev_acc += acc.item()
+                                    # average to multi-gpus
+                                    loss = loss.mean()
+                                    acc = acc.mean()
+                                    acc_slot = acc_slot.mean(0)
 
-                if n_gpu == 1:
-                    if dev_loss_slot is None:
-                        # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
-                        dev_acc_slot = acc_slot * num_valid_turn
-                        dev_acc_slot_type = type_acc_slot * num_valid_turn
-                        dev_loss_slot = [l * batch_size for l in loss_slot]
-                        # dev_acc_slot = acc_slot
-                    else:
-                        for i, l in enumerate(loss_slot):
-                            # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
-                            dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
-                        dev_acc_slot += acc_slot * num_valid_turn
-                        dev_acc_slot_type += type_acc_slot * num_valid_turn
-                        # dev_acc_slot += acc_slot
+                            num_valid_turn = torch.sum(answer_type_ids[:, :, 0].view(-1) > -1,
+                                                       0).item()  # valid turns for all current batch
+                            # dev_loss += loss.item() * num_valid_turn
+                            dev_acc += acc.item() * num_valid_turn
+                            dev_loss += loss.item() * batch_size
+                            dev_type_acc += type_acc.item() * num_valid_turn
+                            # dev_acc += acc.item()
 
-                nb_dev_examples += num_valid_turn
+                            if n_gpu == 1:
+                                if dev_loss_slot is None:
+                                    # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
+                                    dev_acc_slot = acc_slot * num_valid_turn
+                                    dev_acc_slot_type = type_acc_slot * num_valid_turn
+                                    dev_loss_slot = [l * batch_size for l in loss_slot]
+                                    # dev_acc_slot = acc_slot
+                                else:
+                                    for i, l in enumerate(loss_slot):
+                                        # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
+                                        dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
+                                    dev_acc_slot += acc_slot * num_valid_turn
+                                    dev_acc_slot_type += type_acc_slot * num_valid_turn
+                                    # dev_acc_slot += acc_slot
 
-            # dev_loss = dev_loss / nb_dev_examples
-            dev_loss = dev_loss / all_input_ids_dev.size(0)
-            dev_acc = dev_acc / nb_dev_examples
-            dev_type_acc = dev_type_acc / nb_dev_examples
+                            nb_dev_examples += num_valid_turn
 
-            if n_gpu == 1:
-                dev_acc_slot = dev_acc_slot / nb_dev_examples
-                dev_acc_slot_type = dev_acc_slot_type / nb_dev_examples
+                        # dev_loss = dev_loss / nb_dev_examples
+                        dev_loss = dev_loss / all_input_ids_dev.size(0)
+                        dev_acc = dev_acc / nb_dev_examples
+                        dev_type_acc = dev_type_acc / nb_dev_examples
 
-            # tensorboard logging
-            if summary_writer is not None:
-                summary_writer.add_scalar("Validate/Loss", dev_loss, global_step)
-                summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
-                summary_writer.add_scalar("Validate/Cls_Acc", dev_type_acc, global_step)
-                if n_gpu == 1:
-                    for i, slot in enumerate(processor.target_slot):
-                        summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
-                                                  dev_loss_slot[i] / all_input_ids_dev.size(0), global_step)
-                        summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i],
-                                                  global_step)
-                        summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
-                                                  global_step)
-                    if hasattr(model, "get_metric"):
-                        metric = model.get_metric(reset=True)
-                        for k, v in metric.items():
-                            summary_writer.add_scalar(f"Validate/{k}", v, global_step)
+                        if n_gpu == 1:
+                            dev_acc_slot = dev_acc_slot / nb_dev_examples
+                            dev_acc_slot_type = dev_acc_slot_type / nb_dev_examples
 
-            dev_loss = round(dev_loss, 6)
-            # if last_update is None or dev_loss < best_loss:
-            if last_update is None or dev_acc > best_acc:
-                # Save a trained model
-                output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
-                if args.do_train:
-                    if n_gpu == 1:
-                        torch.save(model.state_dict(), output_model_file)
-                    else:
-                        torch.save(model.module.state_dict(), output_model_file)
+                        # tensorboard logging
+                        if summary_writer is not None:
+                            summary_writer.add_scalar("Validate/Loss", dev_loss, global_step)
+                            summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
+                            summary_writer.add_scalar("Validate/Cls_Acc", dev_type_acc, global_step)
+                            if n_gpu == 1:
+                                for i, slot in enumerate(processor.target_slot):
+                                    summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
+                                                              dev_loss_slot[i] / all_input_ids_dev.size(0), global_step)
+                                    summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i],
+                                                              global_step)
+                                    summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
+                                                              global_step)
+                                if hasattr(model, "get_metric"):
+                                    metric = model.get_metric(reset=True)
+                                    for k, v in metric.items():
+                                        summary_writer.add_scalar(f"Validate/{k}", v, global_step)
 
-                last_update = epoch
-                # best_loss = dev_loss
-                best_acc = dev_acc
+                        dev_loss = round(dev_loss, 6)
+                        if last_update is None or dev_acc > best_acc:
+                            # Save a trained model
+                            output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
+                            if args.do_train:
+                                if n_gpu == 1:
+                                    torch.save(model.state_dict(), output_model_file)
+                                else:
+                                    torch.save(model.module.state_dict(), output_model_file)
 
-                logger.info(
-                    "*** Model Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
-                    last_update, dev_loss, best_acc))
-            else:
-                logger.info(
-                    "*** Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
-                    epoch, dev_loss, dev_acc))
+                            last_update = global_step
+                            best_acc = dev_acc
 
-            if last_loss_update is None or dev_loss < best_loss:
-                # Save a trained model
-                output_model_file = os.path.join(args.output_dir, "pytorch_model_loss.bin")
-                if args.do_train:
-                    if n_gpu == 1:
-                        torch.save(model.state_dict(), output_model_file)
-                    else:
-                        torch.save(model.module.state_dict(), output_model_file)
+                            logger.info(
+                                "*** Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
+                                    global_step, dev_loss, best_acc))
+                        else:
+                            logger.info(
+                                "*** Model NOT Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
+                                    global_step, dev_loss, dev_acc))
 
-                last_loss_update = epoch
-                best_loss = dev_loss
-                # best_acc = dev_acc
+                        if last_loss_update is None or dev_loss < best_loss:
+                            # Save a trained model
+                            output_model_file = os.path.join(args.output_dir, "pytorch_model_loss.bin")
+                            if args.do_train:
+                                if n_gpu == 1:
+                                    torch.save(model.state_dict(), output_model_file)
+                                else:
+                                    torch.save(model.module.state_dict(), output_model_file)
 
-                logger.info(
-                    "*** Lowest Loss Model Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
-                        last_loss_update, best_loss, dev_acc))
-            else:
-                logger.info(
-                    "*** Lowest Loss Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
-                        epoch, dev_loss, dev_acc))
+                            last_loss_update = global_step
+                            best_loss = dev_loss
 
-            if last_update + args.patience <= epoch:
+                            logger.info(
+                                "*** Lowest Loss Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
+                                    global_step, best_loss, dev_acc))
+                        else:
+                            logger.info(
+                                "*** Lowest Loss Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
+                                    global_step, dev_loss, dev_acc))
+
+                        if last_update + args.patience * args.per_eval_steps <= global_step:
+                            break
+
+            if last_update + args.patience * args.per_eval_steps <= global_step:
                 break
 
     ###############################################################################

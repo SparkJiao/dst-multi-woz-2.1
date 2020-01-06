@@ -262,8 +262,6 @@ class BeliefTracker(nn.Module):
         if self.add_sup > 0:
             slot_target = answer_type_ids.view(bs, 1, 1, slot_dim).expand(
                 -1, slot_dim, slot_score.size(1), -1).reshape(bs * slot_dim, -1, slot_dim)
-            # FIXME: Find bug here.
-            #  The `self_mask` mask or values except the slot itself. Should be `1 - self_mask`
             self_mask = self_mask[:, None, :].expand(-1, slot_score.size(1), -1)
             slot_target[self_mask.to(dtype=torch.bool)] = -1
             loss = self.add_sup * layers.negative_entropy(score=slot_score.squeeze(2), target=(slot_target == 0)) / (
