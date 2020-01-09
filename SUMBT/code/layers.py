@@ -173,8 +173,8 @@ class DynamicFusion(nn.Module):
         super(DynamicFusion, self).__init__()
         self.transform1 = nn.Linear(input_size, input_size)
         self.fuse_f = nn.Linear(input_size * 4, input_size)
-        logger.info(f'{self.__class__.__name__} parameters:')
-        logger.info(f'Gate type: {gate_type}')
+        logger.info(f'{self.__class__.__name__} parameters:\n'
+                    f'Gate type: {gate_type}')
         if gate_type == 0:
             self.gate_f = nn.Linear(input_size * 4, input_size)
         elif gate_type == 1:
@@ -354,9 +354,135 @@ class SimpleHierarchicalAttention(nn.Module):
             return sentence_hidden.squeeze(1), sent_score
         return sentence_hidden.squeeze(1)  # (batch * query_seq, h)
 
+
+class LinearSeqAttention(nn.Module):
+    def __init__(self, config: BertConfig, head_num=-1, add_output=False, add_layer_norm=False):
+        super(LinearSeqAttention, self).__init__()
+
+        self.num_attention_heads = config.num_attention_heads if head_num == -1 else head_num
+        self.attention_head_size = int(config.hidden_size / self.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(config.hidden_size, self.num_attention_heads)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+
+        self.add_output = add_output
+        self.add_layer_norm = add_layer_norm
+        if add_output:
+            self.output = nn.Sequential(nn.Linear(config.hidden_size, config.hidden_size),
+                                        nn.Dropout(config.hidden_dropout_prob))
+            if add_layer_norm:
+                self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, x.size(-1) // self.num_attention_heads)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(self, hidden_states, attention_mask):
+        mixed_query_layer = self.query(hidden_states)
+        mixed_value_layer = self.value(hidden_states)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer).squeeze(-1).unsqueeze(2)
+        assert query_layer.size() == (mixed_value_layer.size(0), self.num_attention_heads, 1,
+                                      mixed_query_layer.size(1)), (mixed_query_layer.size(), query_layer.size())
+        # logger.info(query_layer.size())
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+        # logger.info(value_layer.size())
+
+        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores = query_layer + attention_mask
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+        # logger.info(context_layer.size())
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+        # logger.info(context_layer.size())
+
+        if self.add_output:
+            context_layer = self.output(context_layer)
+            if self.add_layer_norm:
+                context_layer = self.LayerNorm(context_layer)
+
+        return context_layer, (mixed_query_layer, mixed_value_layer)
+
+
+class PropAttention(nn.Module):
+    def __init__(self, config: BertConfig, add_output=False, add_layer_norm=False, add_residual=False):
+        super(PropAttention, self).__init__()
+
+        self.cross_attention = MultiHeadAttention(config)
+        self.prop_attention = MultiHeadAttention(config)
+
+        self.add_output = add_output
+        self.add_layer_norm = add_layer_norm
+        self.add_residual = add_residual
+
+        logger.info(f'PropAttention Parameters: \nadd_output: {self.add_output}\n'
+                    f'add_layer_norm: {self.add_layer_norm}\n'
+                    f'add_residual: {self.add_residual}')
+
+        if self.add_output:
+            self.output = nn.Linear(config.hidden_size, config.hidden_size)
+            if self.add_layer_norm:
+                self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, slot_h, utt_hidden, slot_mask=None, utt_mask=None):
+        """
+        :param slot_h: (bs, slot_dim, h)
+        :param utt_hidden: (bs, utt_len, h)
+        :param slot_mask: (bs, (slot_dim), slot_dim)
+        :param utt_mask: (bs, utt_len)
+        :return:
+        """
+        bs, slot_dim, h = slot_h.size()
+        utt_len = utt_hidden.size(1)
+
+        slot_mask = slot_mask.to(dtype=slot_h.dtype) if slot_mask is not None else slot_h.new_ones((bs, slot_dim))
+        utt_mask = utt_mask.to(dtype=slot_h.dtype) if utt_mask is not None else slot_h.new_ones((bs, utt_len))
+
+        slot_mask = expand_mask((1 - slot_mask) * -10000.0)
+        utt_mask = expand_mask((1 - utt_mask) * -10000.0)
+
+        # (bs, slot_dim, h)
+        attended_utt_h, _ = self.cross_attention(slot_h, utt_hidden, utt_hidden, utt_mask)
+        assert attended_utt_h.size() == (bs, slot_dim, h)
+
+        hidden, (_, _, _, scores) = self.prop_attention(slot_h, attended_utt_h, attended_utt_h, slot_mask)
+
+        if self.add_output:
+            hidden = self.dropout(self.output(hidden))
+            if self.add_layer_norm:
+                if self.add_residual:
+                    hidden = slot_h + hidden
+                hidden = self.LayerNorm(hidden)
+
+        return hidden, scores
+
+
 # ===============================
 # Function
 # ===============================
+
+
+def expand_mask(mask):
+    if mask.dim() == 2:
+        mask = mask[:, None, None, :]
+    elif mask.dim() == 3:
+        mask = mask[:, None, :, :]
+    return mask
 
 
 def negative_entropy(score, target, reduction='sum'):
@@ -370,6 +496,7 @@ def negative_entropy(score, target, reduction='sum'):
     # log_score = torch.log_softmax(score.to(dtype=torch.float), dim=-1)
     # loss = log_score[target].sum().to(dtype=dtype)
     neg_score = 1 - score.to(dtype=torch.float).softmax(dim=-1)
+    # logger.info(neg_score)
     # log_score = -torch.log(neg_score + 1e-6)
     log_score = -torch.log(neg_score + 1e-6)
     loss = log_score[target].sum().to(dtype=dtype)
@@ -410,3 +537,37 @@ def get_casual_mask(seq_length, device):
     position_ids = torch.arange(seq_length, dtype=torch.long, device=device)
     casual_mask = position_ids[None, None, :].repeat(1, seq_length, 1) <= position_ids[None, :, None]
     return casual_mask
+
+
+def get_domain_mask_5domain(mask_self: bool = True):
+    slot_idx = {'attraction': [0, 1, 2], 'hotel': [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                'restaurant': [13, 14, 15, 16, 17, 18, 19], 'taxi': [20, 21, 22, 23], 'train': [24, 25, 26, 27, 28, 29]}
+    slot_dim = 30
+
+    domain_mask = torch.zeros((slot_dim, slot_dim))
+    for d in slot_idx.values():
+        d_s, d_e = d[0], d[0] + len(d)
+        domain_mask[d_s:d_e, d_s:d_e] = torch.ones((len(d), len(d)))
+        if mask_self:
+            for x in d:
+                domain_mask[x, x] = 0
+
+    return domain_mask
+
+
+def get_restaurant_attraction_mask(mask_self: bool = False):
+    slot_idx = {'attraction': [0, 1, 2], 'hotel': [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                'restaurant': [13, 14, 15, 16, 17, 18, 19], 'taxi': [20, 21, 22, 23], 'train': [24, 25, 26, 27, 28, 29]}
+    slot_dim = 30
+
+    domain_mask = torch.zeros((slot_dim, slot_dim))
+    for d_name, d in slot_idx.items():
+        if d_name not in ['restaurant', 'attraction']:
+            continue
+        d_s, d_e = d[0], d[0] + len(d)
+        domain_mask[d_s:d_e, d_s:d_e] = torch.ones((len(d), len(d)))
+        if mask_self:
+            for x in d:
+                domain_mask[x, x] = 0
+
+    return domain_mask

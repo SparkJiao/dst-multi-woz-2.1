@@ -651,6 +651,13 @@ def main():
     parser.add_argument('--hidden_output', default=False, action='store_true')
     parser.add_argument('--dropout', default=None, type=float)
 
+    parser.add_argument('--pre_turn', default=2, type=int)
+
+    parser.add_argument('--use_pooling', default=False, action='store_true')
+    parser.add_argument('--pooling_head_num', default=1, type=int)
+    parser.add_argument('--use_mt', default=False, action='store_true')
+    parser.add_argument('--inter_domain', default=False, action='store_true')
+
     args = parser.parse_args()
 
     # check output_dir
@@ -841,8 +848,14 @@ def main():
         from BeliefTrackerShareSA_flat_hie_cls_simple import BeliefTracker
     elif args.nbt == 'hie_mt':
         from BeliefTrackerShareSA_flat_hie_cls_mt import BeliefTracker
+    elif args.nbt == 'hie_domain':
+        from BeliefTrackerShareSA_flat_hie_cls_domain import BeliefTracker
     elif args.nbt == 'flow_hie':
         from BeliefTrackerShareSA_flat_flow_hie import BeliefTracker
+    elif args.nbt == 'flat_xl':
+        from BeliefTrackerShareSA_flat_xl import BeliefTracker
+    elif args.nbt == 'hie_pp':
+        from BeliefTrackerShareSA_pp_hie_cls import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -1094,11 +1107,11 @@ def main():
                             best_acc = dev_acc
 
                             logger.info(
-                                "*** Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
+                                "Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
                                     global_step, dev_loss, best_acc))
                         else:
                             logger.info(
-                                "*** Model NOT Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
+                                "Model NOT Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
                                     global_step, dev_loss, dev_acc))
 
                         if last_loss_update is None or dev_loss < best_loss:
@@ -1114,11 +1127,11 @@ def main():
                             best_loss = dev_loss
 
                             logger.info(
-                                "*** Lowest Loss Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (
+                                "Lowest Loss Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
                                     global_step, best_loss, dev_acc))
                         else:
                             logger.info(
-                                "*** Lowest Loss Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (
+                                "Lowest Loss Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
                                     global_step, dev_loss, dev_acc))
 
                         if last_update + args.patience * args.per_eval_steps <= global_step:
