@@ -658,6 +658,8 @@ def main():
     parser.add_argument('--use_mt', default=False, action='store_true')
     parser.add_argument('--inter_domain', default=False, action='store_true')
 
+    parser.add_argument('--detach', default=False, action='store_true')
+
     args = parser.parse_args()
 
     # check output_dir
@@ -854,6 +856,8 @@ def main():
         from BeliefTrackerShareSA_flat_flow_hie import BeliefTracker
     elif args.nbt == 'flat_xl':
         from BeliefTrackerShareSA_flat_xl import BeliefTracker
+    elif args.nbt == 'flat_xl2':
+        from BeliefTrackerShareSA_flat_xl2 import BeliefTracker
     elif args.nbt == 'hie_pp':
         from BeliefTrackerShareSA_pp_hie_cls import BeliefTracker
     else:
