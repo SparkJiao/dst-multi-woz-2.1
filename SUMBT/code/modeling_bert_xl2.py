@@ -275,15 +275,24 @@ class BertReshapeAttention(nn.Module):
         if use_context:
             # assert pre_turn > 0
             # assert max_turn > 0
+            # --detach version 1.0
+            # if detach:
+            #     context_key, context_value = self.extract_context(hidden_states, hidden_states, pre_turn, max_turn)
+            #     context_key = context_key.detach()
+            #     context_value = context_value.detach()
+            #     context_key = self.key(context_key)
+            #     context_value = self.value(context_value)
+            # else:
+            #     context_key, context_value = self.extract_context(mixed_key_layer, mixed_value_layer,
+            #                                                       pre_turn=pre_turn, max_turn=max_turn)
+
+            # --detach version 2.0
+            context_key, context_value = self.extract_context(mixed_key_layer, mixed_value_layer,
+                                                              pre_turn=pre_turn, max_turn=max_turn)
             if detach:
-                context_key, context_value = self.extract_context(hidden_states, hidden_states, pre_turn, max_turn)
                 context_key = context_key.detach()
                 context_value = context_value.detach()
-                context_key = self.key(context_key)
-                context_value = self.value(context_value)
-            else:
-                context_key, context_value = self.extract_context(mixed_key_layer, mixed_value_layer,
-                                                                  pre_turn=pre_turn, max_turn=max_turn)
+
             mixed_key_layer = torch.cat([context_key, mixed_key_layer], dim=1)
             mixed_value_layer = torch.cat([context_value, mixed_value_layer], dim=1)
 
@@ -472,15 +481,24 @@ class BertCacheAttention(nn.Module):
         }]
 
         if use_context:
+            # --detach version 1.0
+            # if detach:
+            #     context_key, context_value = self.extract_context(hidden_states, hidden_states, pre_turn, max_turn)
+            #     context_key = context_key.detach()
+            #     context_value = context_value.detach()
+            #     context_key = self.key(context_key)
+            #     context_value = self.value(context_value)
+            # else:
+            #     context_key, context_value = self.extract_context(mixed_key_layer, mixed_value_layer,
+            #                                                       pre_turn=pre_turn, max_turn=max_turn)
+
+            # --detach version 2.0
+            context_key, context_value = self.extract_context(mixed_key_layer, mixed_value_layer,
+                                                              pre_turn=pre_turn, max_turn=max_turn)
             if detach:
-                context_key, context_value = self.extract_context(hidden_states, hidden_states, pre_turn, max_turn)
                 context_key = context_key.detach()
                 context_value = context_value.detach()
-                context_key = self.key(context_key)
-                context_value = self.value(context_value)
-            else:
-                context_key, context_value = self.extract_context(mixed_key_layer, mixed_value_layer,
-                                                                  pre_turn=pre_turn, max_turn=max_turn)
+
             mixed_key_layer = torch.cat([context_key, mixed_key_layer], dim=1)
             mixed_value_layer = torch.cat([context_value, mixed_value_layer], dim=1)
 
