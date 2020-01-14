@@ -8,11 +8,11 @@ from torch.nn import CrossEntropyLoss
 
 try:
     from . import layers
-    from .modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from .modeling_bert_xl import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from .global_logger import get_child_logger
 except ImportError:
     import layers
-    from modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from modeling_bert_xl import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from global_logger import get_child_logger
 
 logger: Logger = get_child_logger(__name__)
@@ -117,10 +117,10 @@ class BeliefTracker(nn.Module):
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
-
-        # logger.info(f'If parallel decoding: {args.parallel}')
-        # self.parallel = args.parallel
-        # self.parallel = False
+        self.use_context = args.use_context
+        logger.info(f"IF Slot XL uses context during dialog encoding: {self.use_context}")
+        self.pre_turn = args.pre_turn
+        logger.info(f"XL extended previous turns: {args.pre_turn}")
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -146,51 +146,6 @@ class BeliefTracker(nn.Module):
                 hid_label = hid_label.detach()
                 self.value_lookup[s] = nn.Embedding.from_pretrained(hid_label, freeze=True)
                 self.value_lookup[s].padding_idx = -1
-        del self.sv_encoder
-        torch.cuda.empty_cache()
-
-        print("Complete initialization of slot and value lookup")
-
-    def initialize_slot_value_lookup_parallel(self, label_ids, slot_ids, slot_token_type_ids=None):
-
-        self.sv_encoder.eval()
-
-        # register slot input buffer
-        slot_mask = slot_ids > 0
-
-        self.register_buffer("slot_ids", slot_ids)
-        self.register_buffer("slot_token_type_ids", slot_token_type_ids)
-        self.register_buffer("slot_mask", slot_mask.to(dtype=torch.long))
-
-        value_lookup = []
-        value_num = []
-
-        with torch.no_grad():
-            for s, label_id in enumerate(label_ids):
-                label_type_ids = torch.zeros(label_id.size(), dtype=torch.long).to(self.device)
-                label_mask = label_id > 0
-                hid_label, _, _ = self.sv_encoder(label_id.view(-1, self.max_label_length),
-                                                  label_type_ids.view(-1, self.max_label_length),
-                                                  label_mask.view(-1, self.max_label_length),
-                                                  output_all_encoded_layers=False,
-                                                  start_offset=0, all_attn_cache=None)
-                hid_label = hid_label[:, 0, :]
-                hid_label = hid_label.detach()
-                value_lookup.append(hid_label)  # (value_num, h)
-                value_num.append(hid_label.size(0))
-
-        max_value_num = max(value_num)
-
-        value_tensor = torch.zeros((slot_ids.size(0), max_value_num, self.bert_output_dim), dtype=torch.float, device=self.device)
-        value_mask = torch.zeros((slot_ids.size(0), max_value_num), dtype=torch.long, device=self.device)
-        for s, value in enumerate(value_lookup):
-            value_tensor[s, :value.size(0)] = value
-            value_mask[s, :value.size(0)] = value.new_ones(value.size(), dtype=torch.long)
-
-        self.register_buffer("defined_values", value_tensor)
-        self.register_buffer("value_mask", value_mask)
-        self.register_buffer("value_num", torch.tensor(value_num, dtype=torch.long, device=self.device))
-
         del self.sv_encoder
         torch.cuda.empty_cache()
 
@@ -224,14 +179,34 @@ class BeliefTracker(nn.Module):
         _, _, all_attn_cache = self.utterance_encoder(input_ids.view(-1, self.max_seq_length),
                                                       token_type_ids.view(-1, self.max_seq_length),
                                                       attention_mask.view(-1, self.max_seq_length),
-                                                      output_all_encoded_layers=False)
+                                                      output_all_encoded_layers=False, use_context=self.use_context,
+                                                      max_turn=ts, pre_turn=self.pre_turn)
+
+        attention_mask = attention_mask.to(dtype=torch.long)
+        context_attention_mask = layers.get_context_mask(attention_mask.view(-1, self.max_seq_length).to(dtype=torch.long),
+                                                         pre_turn=self.pre_turn, max_turn=ts)
 
         # Domain-slot encoding
         slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
         slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
         slot_mask = torch.cat(
-            [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
-             slot_mask.to(dtype=attention_mask.dtype)], dim=-1)
+            [context_attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, (self.pre_turn + 1) * self.max_seq_length),
+             # attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
+             slot_mask], dim=-1)
+
+        for layer_id, layer_cache in enumerate(all_attn_cache):
+            if isinstance(layer_cache, list):
+                context_key, context_value = layers.extract_context(layer_cache[0]["key"], layer_cache[0]["value"],
+                                                                    pre_turn=self.pre_turn, max_turn=ts)
+                layer_cache[0]["key"] = torch.cat([context_key, layer_cache[0]["key"]], dim=-2)
+                layer_cache[0]["value"] = torch.cat([context_value, layer_cache[0]["value"]], dim=-2)
+            elif isinstance(layer_cache, dict):
+                context_key, context_value = layers.extract_context(layer_cache["key"], layer_cache["value"],
+                                                                    pre_turn=self.pre_turn, max_turn=ts)
+                layer_cache["key"] = torch.cat([context_key, layer_cache["key"]], dim=-2)
+                layer_cache["value"] = torch.cat([context_value, layer_cache["value"]], dim=-2)
+            else:
+                raise RuntimeError()
 
         if self.slot_token_type_ids is not None:
             slot_token_type_ids = self.slot_token_type_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
@@ -240,7 +215,7 @@ class BeliefTracker(nn.Module):
 
         hidden, _, _ = self.utterance_encoder(slot_ids, token_type_ids=slot_token_type_ids, attention_mask=slot_mask,
                                               output_all_encoded_layers=False, all_attn_cache=all_attn_cache,
-                                              start_offset=self.max_seq_length, slot_dim=slot_dim)
+                                              start_offset=self.max_seq_length, slot_dim=slot_dim, max_turn=ts)
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
 
         # NBT
@@ -291,28 +266,6 @@ class BeliefTracker(nn.Module):
                     cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 loss_slot[-1] += cls_loss.item()
                 loss += cls_loss
-
-        # if self.parallel:
-        #     max_value_num = self.value_mask.size(1)
-        #     defined_values = self.defined_values.unsqueeze(1).expand(-1, bs, -1, -1).reshape(
-        #         slot_dim * bs, max_value_num, -1)  # (slot_dim, bs, value_num, h)
-        #     value_mask = self.value_mask.unsqueeze(1).expand(-1, bs, -1).reshape(
-        #         slot_dim * bs, max_value_num)  # (slot_dim, bs, value_num)
-        #
-        #     if self.distance_metric == 'product':
-        #         _hidden = hidden.reshape(slot_dim * bs, 1, -1)
-        #         _dist = self.metric(_hidden, defined_values)
-        #     else:
-        #         _hidden = hidden.reshape(slot_dim * bs, 1, -1).expand(-1, max_value_num, -1).contiguous()
-        #         _dist = self.metric(defined_values.view(-1, self.bert_output_dim), _hidden.view(-1, self.bert_output_dim))
-        #     _dist = _dist.view(slot_dim * bs, max_value_num)
-        #     _dist = layers.masked_log_softmax_fp16(_dist, value_mask, dim=-1)
-        #
-        #     _, pred_slot = torch.max(_dist, dim=-1)
-        #     pred_slot = pred_slot.view(slot_dim, ds, ts).permute(1, 2, 0).contiguous()
-        #
-        #     if labels is not None:
-        #         undefined_value_mask = (labels == )
 
         if labels is None:
             return output

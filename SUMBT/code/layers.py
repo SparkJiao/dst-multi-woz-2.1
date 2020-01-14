@@ -524,6 +524,88 @@ def masked_log_softmax_fp16(vector: torch.Tensor, mask: torch.Tensor, dim: int =
     return F.log_softmax(vector, dim=dim)
 
 
+def extract_context(*hidden_states, pre_turn: int = 0, max_turn: int = 0):
+    bs = hidden_states[0].size(0)
+    ds = bs // max_turn
+    h = hidden_states[0].size(-1)
+    # key = hidden_states_key.view(ds, max_turn, -1)
+    # value = hidden_states_value.view(ds, max_turn, -1)
+    seq_len = hidden_states[0].size(-2)
+    turn_shape = (ds, max_turn) + hidden_states[0].size()[1:]
+    hidden_states = [h.view(*turn_shape) for h in hidden_states]
+
+    context_index = torch.arange(max_turn, dtype=torch.long, device=hidden_states[0].device).unsqueeze(-1)  # (max_turn, pre_turn)
+    # (max_turn, pre_turn)
+    _offset = torch.arange(start=pre_turn, end=0, step=-1, dtype=torch.long, device=hidden_states[0].device).unsqueeze(0)
+    context_index = context_index - _offset
+
+    context_index[context_index < 0] = 0
+    context_index = context_index.view(-1)
+
+    if hidden_states[0].dim() == 4:
+        # (ds, max_turn, seq_len, h)
+        output_states = [
+            h.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1) for h in hidden_states
+        ]
+        # assert output_states[0].size() == (bs, pre_turn * seq_len, h)
+    elif hidden_states[0].dim() == 5:
+        # (ds, max_turn, num_head, seq_len, h)
+        new_shape = (bs, pre_turn) + hidden_states[0].size()[2:]
+        num_head = new_shape[2]
+        output_states = [
+            h.index_select(index=context_index, dim=1).reshape(*new_shape).transpose(1, 2).reshape(
+                bs, num_head, pre_turn * seq_len, -1) for h in hidden_states
+        ]
+        # assert output_states[0].size() == (bs, num_head, pre_turn * seq_len, h)
+    else:
+        raise RuntimeError()
+
+    # context_key = key.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1)
+    # context_value = value.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1)
+    # return context_key, context_value
+    return tuple(output_states)
+
+
+def get_context_mask(attention_mask, pre_turn, max_turn):
+    bs = attention_mask.size(0)
+    ds = bs // max_turn
+    seq_len = attention_mask.size(-1)
+
+    ini_dim = attention_mask.dim()
+    if attention_mask.dim() == 2:
+        attention_mask = attention_mask[:, None, None, :]
+    elif attention_mask.dim() == 3:
+        attention_mask = attention_mask[:, None, :, :]
+
+    context_index = torch.arange(max_turn, dtype=torch.long, device=attention_mask.device).unsqueeze(-1)  # (max_turn, pre_turn)
+    # (max_turn, pre_turn)
+    _offset = torch.arange(start=pre_turn, end=0, step=-1, dtype=torch.long, device=attention_mask.device).unsqueeze(0)
+    context_index = context_index - _offset
+
+    # out of context dimension will be clamped as -1
+    # context_mask = (context_index.clamp(-1, 0).to(dtype=attention_mask.dtype) * 10000.0)
+    context_mask = context_index.clamp(-1, 0) + 1
+    # logger.info(context_mask)
+    context_mask = context_mask[None, :, :, None].expand(ds, -1, -1, seq_len)
+    context_mask = context_mask.reshape(bs, 1, 1, pre_turn * seq_len)
+
+    context_index[context_index < 0] = 0
+    context_index = context_index.view(-1)
+
+    self_len = attention_mask.size(2)
+    context_attention_mask = attention_mask.view(ds, max_turn, self_len, seq_len).index_select(index=context_index, dim=1)
+    context_attention_mask = context_attention_mask.reshape(bs, pre_turn, self_len, seq_len).transpose(1, 2)
+    context_attention_mask = context_attention_mask.reshape(bs, 1, self_len, pre_turn * seq_len)
+    attention_mask = torch.cat([context_mask * context_attention_mask, attention_mask], dim=-1)
+
+    if ini_dim == 2:
+        attention_mask = attention_mask.view(bs, (pre_turn + 1) * seq_len)
+    elif ini_dim == 3:
+        attention_mask = attention_mask.view(bs, self_len, (pre_turn + 1) * seq_len)
+
+    return attention_mask
+
+
 def dropout_mask(x, value, mask=None, p=0.):
     prop = (1 - p) * x.new_ones(x.size(), dtype=torch.float)
     if mask is not None:

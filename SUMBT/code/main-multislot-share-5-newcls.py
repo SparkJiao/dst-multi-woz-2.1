@@ -651,12 +651,17 @@ def main():
     parser.add_argument('--hidden_output', default=False, action='store_true')
     parser.add_argument('--dropout', default=None, type=float)
 
+    parser.add_argument('--use_context', default=False, action='store_true')
     parser.add_argument('--pre_turn', default=2, type=int)
 
     parser.add_argument('--use_pooling', default=False, action='store_true')
     parser.add_argument('--pooling_head_num', default=1, type=int)
     parser.add_argument('--use_mt', default=False, action='store_true')
     parser.add_argument('--inter_domain', default=False, action='store_true')
+
+    parser.add_argument('--extra_nbt', default=False, action='store_true')
+    parser.add_argument('--graph_add_sup', default=0., type=float)
+    parser.add_argument('--graph_value_sup', default=0., type=float)
 
     parser.add_argument('--detach', default=False, action='store_true')
 
@@ -860,6 +865,12 @@ def main():
         from BeliefTrackerShareSA_flat_xl2 import BeliefTracker
     elif args.nbt == 'hie_pp':
         from BeliefTrackerShareSA_pp_hie_cls import BeliefTracker
+    elif args.nbt == 'graph':
+        from BeliefTrackerShareSA_cls_graph import BeliefTracker
+    elif args.nbt == 'graph2':
+        from BeliefTrackerShareSA_cls_graph2 import BeliefTracker
+    elif args.nbt == 's_xl':
+        from BeliefTrackerShareSA_flat_s_xl import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -962,6 +973,7 @@ def main():
                 input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
 
                 # Forward
+                # with torch.autograd.set_detect_anomaly(True):
                 if n_gpu == 1:
                     loss, loss_slot, acc, _, acc_slot, _, _ = \
                         model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
@@ -981,7 +993,7 @@ def main():
                 if args.fp16:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
                         scaled_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1.0)
+                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
                     loss.backward()
 
