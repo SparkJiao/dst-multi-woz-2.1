@@ -869,6 +869,12 @@ def main():
         from BeliefTrackerShareSA_cls_graph import BeliefTracker
     elif args.nbt == 'graph2':
         from BeliefTrackerShareSA_cls_graph2 import BeliefTracker
+    elif args.nbt == 'graph3':
+        from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
+    elif args.nbt == 'graph4':
+        from BeliefTrackerShareSA_cls_graph4 import BeliefTracker
+    elif args.nbt == 'graph_re':
+        from BeliefTrackerShareSA_cls_graph_re import BeliefTracker
     elif args.nbt == 's_xl':
         from BeliefTrackerShareSA_flat_s_xl import BeliefTracker
     else:

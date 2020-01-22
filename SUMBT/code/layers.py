@@ -637,6 +637,24 @@ def get_domain_mask_5domain(mask_self: bool = True):
     return domain_mask
 
 
+def get_domain_mask_7domain(mask_self: bool = True):
+    slot_idx = {
+        'attraction': [0, 1, 2], 'bus': [3, 4, 5, 6], 'hospital': [7], 'hotel': [8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+        'restaurant': [18, 19, 20, 21, 22, 23, 24], 'taxi': [25, 26, 27, 28], 'train': [29, 30, 31, 32, 33, 34]
+    }
+    slot_dim = 35
+
+    domain_mask = torch.zeros((slot_dim, slot_dim))
+    for d in slot_idx.values():
+        d_s, d_e = d[0], d[0] + len(d)
+        domain_mask[d_s:d_e, d_s:d_e] = torch.ones((len(d), len(d)))
+        if mask_self:
+            for x in d:
+                domain_mask[x, x] = 0
+
+    return domain_mask
+
+
 def get_restaurant_attraction_mask(mask_self: bool = False):
     slot_idx = {'attraction': [0, 1, 2], 'hotel': [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
                 'restaurant': [13, 14, 15, 16, 17, 18, 19], 'taxi': [20, 21, 22, 23], 'train': [24, 25, 26, 27, 28, 29]}

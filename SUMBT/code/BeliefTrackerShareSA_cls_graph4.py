@@ -103,12 +103,10 @@ class BeliefTracker(nn.Module):
 
         nbt_config.num_attention_heads = 1
         self.value_attention = layers.MultiHeadAttention(nbt_config)
-        # self.value_project = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+        # self.value_project = layers.SimpleTransform(self.bert_output_dim)
 
         self.mask_self = args.mask_self
         logger.info(f'If mask self during graph attention: {self.mask_self}')
-        self.inter_domain = args.inter_domain
-        logger.info(f'If do inter-domain graph attention: {self.inter_domain}')
 
         self.graph_attention = layers.MultiHeadAttention(nbt_config)
         self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1)
@@ -179,17 +177,6 @@ class BeliefTracker(nn.Module):
         self.register_buffer("slot_token_type_ids", slot_token_type_ids)
         self.register_buffer("slot_mask", slot_mask.to(dtype=torch.long))
 
-        if self.inter_domain:
-            if slot_ids.size(0) == 30:
-                inter_domain_mask = layers.get_domain_mask_5domain(mask_self=False)
-            elif slot_ids.size(0) == 35:
-                inter_domain_mask = layers.get_domain_mask_7domain(mask_self=False)
-            else:
-                raise RuntimeError(f"Incompatible slot dim: {slot_ids.size(0)}")
-            inter_domain_mask = inter_domain_mask.to(dtype=torch.float, device=self.device)
-            inter_domain_mask = (1 - inter_domain_mask) * -10000.0
-            self.register_buffer("inter_domain_mask", inter_domain_mask)
-
         max_value_num = 0
         value_list = []
 
@@ -208,16 +195,31 @@ class BeliefTracker(nn.Module):
                 self.value_lookup[s].padding_idx = -1
                 max_value_num = max(max_value_num, hid_label.size(0))
                 value_list.append(hid_label)
+
+        # [CLS] no value [SEP]
+        no_value_ids = [101, 2053, 3643, 102]
+        no_value_ids = no_value_ids + [0] * (label_ids[0].size(0) - 4)
+        no_value_ids = torch.tensor(no_value_ids, device=self.device, dtype=torch.long)
+        no_value_type_ids = no_value_ids.new_zeros(no_value_ids.size())
+        no_value_mask = no_value_ids > 0
+        no_value_label, _, _ = self.sv_encoder(no_value_ids.unsqueeze(0),
+                                               no_value_type_ids.unsqueeze(0),
+                                               no_value_mask.unsqueeze(0),
+                                               output_all_encoded_layers=False, start_offset=0, all_attn_cache=None)
+        no_value_label = no_value_label[:, 0, :].squeeze(0)
+
         del self.sv_encoder
         torch.cuda.empty_cache()
 
-        value_tensor = torch.zeros((slot_ids.size(0), max_value_num, self.bert_output_dim),
+        # add `no value` label at index 0
+        value_tensor = torch.zeros((slot_ids.size(0), max_value_num + 1, self.bert_output_dim),
                                    dtype=value_list[0].dtype, device=self.device)
-        value_mask = torch.zeros((slot_ids.size(0), max_value_num), dtype=torch.long, device=self.device)
+        value_mask = torch.zeros((slot_ids.size(0), max_value_num + 1), dtype=torch.long, device=self.device)
         for s, value in enumerate(value_list):
             value_num = value.size(0)
-            value_tensor[s, :value_num] = value
-            value_mask[s, :value_num] = value.new_ones(value.size()[:-1], dtype=torch.long)
+            value_tensor[s, 0] = no_value_label
+            value_tensor[s, 1:(value_num + 1)] = value
+            value_mask[s, :(value_num + 1)] = value.new_ones(value_num + 1, dtype=torch.long)
         self.register_buffer("defined_values", value_tensor)
         self.register_buffer("value_mask", value_mask)
 
@@ -334,6 +336,8 @@ class BeliefTracker(nn.Module):
         # Construct graph
         # incorporated_hidden = self.value_project(torch.cat([hidden, value_hidden.squeeze(1)], dim=-1)).view(slot_dim, ds, ts, -1)
         # incorporated_hidden = incorporated_hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        # incorporated_hidden = self.value_project(hidden, value_hidden.squeeze(1)).view(slot_dim, ds, ts, -1)
+        # graph_key = incorporated_hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
         hidden = hidden.view(slot_dim, ds, ts, -1)
         graph_value = value_hidden.view(slot_dim, ds, ts, -1)[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
         graph_query = hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
@@ -343,8 +347,6 @@ class BeliefTracker(nn.Module):
         if self.mask_self:
             diag_mask = torch.diag(graph_mask.new_ones(slot_dim).fill_(-10000.0), diagonal=0)
             graph_mask = graph_mask + diag_mask[None, None, :, :]
-        if self.inter_domain:
-            graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
         graph_hidden, (_, _, _, graph_scores) = self.graph_attention(graph_query, graph_key, graph_value, graph_mask)
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
 
@@ -412,8 +414,14 @@ class BeliefTracker(nn.Module):
                 loss += _loss
 
                 if self.graph_value_sup > 0:
+                    # add `no value` labels: set offset = 1
+                    negative_mask = (masked_slot_labels_for_loss == -1)
+                    off_labels = masked_slot_labels_for_loss + 1
+                    no_value_mask = ((answer_type_ids[:, :, s] == 0) | (answer_type_ids[:, :, s] == 1))
+                    off_labels[negative_mask] = -1  # set previous -1 labels still as -1
+                    off_labels[no_value_mask] = 0  # set no value positions as 0
                     graph_value_loss = nn.functional.nll_loss(masked_value_scores[s].view(bs, -1),
-                                                              masked_slot_labels_for_loss.view(-1), ignore_index=-1,
+                                                              off_labels.view(-1), ignore_index=-1,
                                                               reduction='sum') / ds
                     graph_value_loss = self.graph_value_sup * graph_value_loss
                     loss += graph_value_loss
