@@ -665,6 +665,9 @@ def main():
 
     parser.add_argument('--detach', default=False, action='store_true')
 
+    parser.add_argument('--override_attn_extra', default=False, action='store_true')
+    parser.add_argument('--fusion_no_transform', default=False, action='store_true')
+
     args = parser.parse_args()
 
     # check output_dir

@@ -169,12 +169,16 @@ class Attention(nn.Module):
 
 
 class DynamicFusion(nn.Module):
-    def __init__(self, input_size, act_fn=gelu, gate_type=0):
+    def __init__(self, input_size, act_fn=gelu, gate_type=0, no_transform=False):
         super(DynamicFusion, self).__init__()
-        self.transform1 = nn.Linear(input_size, input_size)
+        self.no_transform = no_transform
+        if not self.no_transform:
+            self.transform1 = nn.Linear(input_size, input_size)
         self.fuse_f = nn.Linear(input_size * 4, input_size)
         logger.info(f'{self.__class__.__name__} parameters:\n'
-                    f'Gate type: {gate_type}')
+                    f'Gate type: {gate_type}\n'
+                    f'No transform before fusion: {no_transform}\n'
+                    f'Activation function: {act_fn}')
         if gate_type == 0:
             self.gate_f = nn.Linear(input_size * 4, input_size)
         elif gate_type == 1:
@@ -189,8 +193,9 @@ class DynamicFusion(nn.Module):
         :param y: attended sequence
         :return: fused sequence
         """
-        y_t = self.act_fn(self.transform1(y))
-        z = torch.cat([x, y_t, x - y_t, x * y_t], dim=-1)
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
         gate = torch.sigmoid(self.gate_f(z))
         fusion = self.act_fn(self.fuse_f(z))
         res = gate * fusion + (1 - gate) * x

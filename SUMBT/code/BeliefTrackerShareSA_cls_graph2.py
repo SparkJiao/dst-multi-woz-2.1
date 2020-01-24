@@ -96,8 +96,15 @@ class BeliefTracker(nn.Module):
         logger.info(f"If extra neural belief tracker: {args.extra_nbt}")
         self.extra_nbt = args.extra_nbt
         if self.extra_nbt:
-            self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                            add_layer_norm=args.sa_add_layer_norm)
+            self.override_attn_extra = args.override_attn_extra
+            logger.info(f'If override self attention from last layer of BERT for extra belief tracker: {self.override_attn_extra}')
+            if self.override_attn_extra:
+                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                                add_layer_norm=args.sa_add_layer_norm,
+                                                                self_attention=last_attention)
+            else:
+                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                                add_layer_norm=args.sa_add_layer_norm)
             if args.share_position_weight:
                 self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
@@ -111,7 +118,7 @@ class BeliefTracker(nn.Module):
         logger.info(f'If do inter-domain graph attention: {self.inter_domain}')
 
         self.graph_attention = layers.MultiHeadAttention(nbt_config)
-        self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1)
+        self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform)
 
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
