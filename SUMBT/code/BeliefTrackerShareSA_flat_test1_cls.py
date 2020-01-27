@@ -99,6 +99,11 @@ class BeliefTracker(nn.Module):
                                             nn.Tanh(),
                                             nn.Linear(self.bert_output_dim, 3))
 
+        self.hidden_output = args.hidden_output
+        logger.info(f'If add output layer for hidden states: {self.hidden_output}')
+        if self.hidden_output:
+            self.hidden_w = nn.Linear(self.bert_output_dim, self.bert_output_dim, bias=False)
+
         # Measure
         self.distance_metric = args.distance_metric
         if self.distance_metric == "cosine":
@@ -245,6 +250,9 @@ class BeliefTracker(nn.Module):
 
         # NBT
         hidden = self.transformer(hidden, None).view(slot_dim, ds, ts, -1)
+
+        if self.hidden_output:
+            hidden = self.hidden_w(hidden)
 
         answer_type_logits = self.classifier(hidden)
         _, answer_type_pred = answer_type_logits.max(dim=-1)
