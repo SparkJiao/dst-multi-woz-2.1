@@ -134,12 +134,7 @@ class BeliefTracker(nn.Module):
         # self.graph_attention = layers.MultiHeadAttention(nbt_config)
         self.graph_attention = layers.Attention(nbt_config, add_output=args.graph_add_output,
                                                 add_layer_norm=args.graph_add_layer_norm, use_residual=args.graph_add_residual)
-        self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform)
-
-        logger.info(f'If use hard attention in graph connecting: {args.graph_hard_attn}')
-        self.graph_hard_attention = args.graph_hard_attn
-        logger.info(f'If use reinforcement learning to optimize: {args.use_rl}')
-        self.use_rl = args.use_rl
+        self.graph_project = layers.DynamicGate(self.bert_output_dim, gate_type=args.gate_type)
 
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
@@ -373,8 +368,7 @@ class BeliefTracker(nn.Module):
             graph_mask = graph_mask + diag_mask[None, None, :, :]
         if self.inter_domain:
             graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
-        graph_hidden, (_, _, _, graph_scores) = self.graph_attention(graph_query, graph_key, graph_value, graph_mask,
-                                                                     hard=self.graph_hard_attention)
+        graph_hidden, (_, _, _, graph_scores) = self.graph_attention(graph_query, graph_key, graph_value, graph_mask)
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
 
         # Fusion

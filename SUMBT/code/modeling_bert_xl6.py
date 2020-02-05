@@ -51,7 +51,13 @@ class BertEmbeddings(nn.Module):
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, input_ids, token_type_ids=None, position_ids=None, start_offset=0):
+    def generate_turn_embedding(self, pre_turn, device):
+        turn_ids = torch.arange(pre_turn + 1, dtype=torch.long, device=device)
+        turn_embedding = self.position_embeddings(turn_ids)
+
+        return turn_embedding
+
+    def forward(self, input_ids, token_type_ids=None, position_ids=None, start_offset=0, pre_turn: int = 0):
         """
         start_offset: offset for position ids
         """
@@ -67,9 +73,15 @@ class BertEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = words_embeddings + position_embeddings + token_type_embeddings
+
+        if pre_turn > 0:
+            turn_scores = self.generate_turn_embedding(pre_turn, input_ids.device)
+        else:
+            turn_scores = None
+
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
-        return embeddings
+        return embeddings, turn_scores
 
 
 class BertSelfAttention(nn.Module):
@@ -190,6 +202,21 @@ class BertReshapeAttention(nn.Module):
             self.extra_key = copy.deepcopy(self.key)
             self.extra_value = copy.deepcopy(self.value)
 
+        self.turn_query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.turn_key = nn.Linear(config.hidden_size, self.all_head_size)
+
+    def get_turn_scores(self, turn_embedding, seq_len):
+        q = turn_embedding[-1][None, None, :]
+        k = turn_embedding[None, :, :]
+
+        turn_query = self.transpose_for_scores(q)
+        turn_key = self.transpose_for_scores(k)
+
+        turn_scores = torch.matmul(turn_query, turn_key.transpose(-1, -2))
+        turn_scores = turn_scores.repeat(1, 1, seq_len, seq_len)
+        assert turn_scores.size() == (1, self.num_attention_heads, seq_len, turn_embedding.size(0) * seq_len)
+        return turn_scores
+
     def copy_weight(self):
         self.extra_key = copy.deepcopy(self.key)
         self.extra_value = copy.deepcopy(self.value)
@@ -233,22 +260,53 @@ class BertReshapeAttention(nn.Module):
         new_shape = (slot_dim * bs, num_head, seq_len, h)
         return x.reshape(*new_shape)
 
-    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0, slot_unified_mask=None):
+    @staticmethod
+    def extract_context(hidden_states_key, hidden_states_value, pre_turn: int, max_turn: int):
+        bs = hidden_states_key.size(0)
+        ds = bs // max_turn
+        key = hidden_states_key.view(ds, max_turn, -1)
+        value = hidden_states_value.view(ds, max_turn, -1)
+        seq_len = hidden_states_key.size(1)
+
+        context_index = torch.arange(max_turn, dtype=torch.long, device=key.device).unsqueeze(-1)  # (max_turn, pre_turn)
+        # (max_turn, pre_turn)
+        _offset = torch.arange(start=pre_turn, end=0, step=-1, dtype=torch.long, device=key.device).unsqueeze(0)
+        context_index = context_index - _offset
+
+        context_index[context_index < 0] = 0
+        context_index = context_index.view(-1)
+
+        context_key = key.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1)
+        context_value = value.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1)
+        return context_key, context_value
+
+    def expand_turn_score(self, turn_scores, bs, seq_len):
+        all_turn = turn_scores.size(-1)
+        turn_scores = turn_scores[None, :, :, None, :, None].expand(bs, -1, -1, seq_len, -1, seq_len)
+        turn_scores = turn_scores.reshape(bs, self.num_attention_heads, seq_len, all_turn * seq_len)
+        return turn_scores
+
+    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0, slot_unified_mask=None,
+                use_context=False, pre_turn=0, max_turn=0, turn_embedding=None):
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
 
-        # if attn_cache is not None:
-        #     mixed_value_layer = torch.cat([attn_cache["value"], mixed_value_layer], dim=1)
+        new_attn_cache = {
+            "key": self.transpose_for_scores(mixed_key_layer),
+            "value": self.transpose_for_scores(mixed_value_layer)
+        }
+
+        if use_context:
+            context_key, context_value = self.extract_context(mixed_key_layer, mixed_value_layer,
+                                                              pre_turn=pre_turn, max_turn=max_turn)
+
+            mixed_key_layer = torch.cat([context_key, mixed_key_layer], dim=1)
+            mixed_value_layer = torch.cat([context_value, mixed_value_layer], dim=1)
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
         key_layer = self.transpose_for_scores(mixed_key_layer)
         value_layer = self.transpose_for_scores(mixed_value_layer)
-
-        new_attn_cache = {
-            "key": key_layer,
-            "value": value_layer
-        }
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
@@ -323,6 +381,11 @@ class BertReshapeAttention(nn.Module):
             single_dim_value.append(attn_cache["value"])
             single_dim_len += seq_len
 
+        # Add turn scores
+        if use_context and turn_embedding is not None:
+            turn_scores = self.get_turn_scores(turn_embedding, hidden_states.size(1))
+            attention_scores = attention_scores + turn_scores
+
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
         attention_scores = attention_scores + attention_mask
@@ -371,6 +434,20 @@ class BertCacheAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
+        self.turn_query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.turn_key = nn.Linear(config.hidden_size, self.all_head_size)
+
+    def get_turn_scores(self, turn_embedding, seq_len):
+        q = turn_embedding[-1][None, None, :]
+        k = turn_embedding[None, :, :]
+
+        turn_query = self.transpose_for_scores(q)
+        turn_key = self.transpose_for_scores(k)
+
+        turn_scores = torch.matmul(turn_query, turn_key.transpose(-1, -2))
+        turn_scores = turn_scores.repeat(1, 1, seq_len, seq_len)
+        return turn_scores
+
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
@@ -399,19 +476,53 @@ class BertCacheAttention(nn.Module):
         new_shape = (slot_dim * bs, num_head, seq_len, h)
         return x.reshape(*new_shape)
 
-    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0, extra_dropout=-1):
+    @staticmethod
+    def extract_context(hidden_states_key, hidden_states_value, pre_turn: int, max_turn: int):
+        bs = hidden_states_key.size(0)
+        ds = bs // max_turn
+        key = hidden_states_key.view(ds, max_turn, -1)
+        value = hidden_states_value.view(ds, max_turn, -1)
+        seq_len = hidden_states_key.size(1)
+
+        context_index = torch.arange(max_turn, dtype=torch.long, device=key.device).unsqueeze(-1)  # (max_turn, pre_turn)
+        # (max_turn, pre_turn)
+        _offset = torch.arange(start=pre_turn, end=0, step=-1, dtype=torch.long, device=key.device).unsqueeze(0)
+        context_index = context_index - _offset
+
+        context_index[context_index < 0] = 0
+        context_index = context_index.view(-1)
+
+        context_key = key.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1)
+        context_value = value.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1)
+        return context_key, context_value
+
+    def expand_turn_score(self, turn_scores, bs, seq_len):
+        all_turn = turn_scores.size(-1)
+        turn_scores = turn_scores[None, :, :, None, :, None].expand(bs, -1, -1, seq_len, -1, seq_len)
+        turn_scores = turn_scores.reshape(bs, self.num_attention_heads, seq_len, all_turn * seq_len)
+        return turn_scores
+
+    def forward(self, hidden_states, attention_mask, attn_cache=None, slot_dim=0, extra_dropout=-1,
+                use_context=False, pre_turn=0, max_turn=0, turn_embedding=None):
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
 
+        new_attn_cache = [{
+            "key": self.transpose_for_scores(mixed_key_layer),
+            "value": self.transpose_for_scores(mixed_value_layer)
+        }]
+
+        if use_context:
+            context_key, context_value = self.extract_context(mixed_key_layer, mixed_value_layer,
+                                                              pre_turn=pre_turn, max_turn=max_turn)
+
+            mixed_key_layer = torch.cat([context_key, mixed_key_layer], dim=1)
+            mixed_value_layer = torch.cat([context_value, mixed_value_layer], dim=1)
+
         query_layer = self.transpose_for_scores(mixed_query_layer)
         key_layer = self.transpose_for_scores(mixed_key_layer)
         value_layer = self.transpose_for_scores(mixed_value_layer)
-
-        new_attn_cache = [{
-            "key": key_layer,
-            "value": value_layer
-        }]
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
@@ -444,6 +555,12 @@ class BertCacheAttention(nn.Module):
 
         if cache_scores:
             attention_scores = torch.cat(cache_scores + [attention_scores], dim=-1)
+
+        # Add turn scores
+        if use_context and turn_embedding is not None:
+            turn_scores = self.get_turn_scores(turn_embedding, hidden_states.size(1))
+            attention_scores = attention_scores + turn_scores
+
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
         attention_scores = attention_scores + attention_mask  # the size of mask should be expand before forward.
@@ -559,15 +676,99 @@ class BertEncoder(nn.Module):
         layer = BertLayer(config)
         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None, **kwargs):
+    @staticmethod
+    def extract_context(hidden_states_key, hidden_states_value, pre_turn: int, max_turn: int):
+        bs = hidden_states_key.size(0)
+        ds = bs // max_turn
+        key = hidden_states_key.view(ds, max_turn, -1)
+        value = hidden_states_value.view(ds, max_turn, -1)
+        seq_len = hidden_states_key.size(1)
+
+        # DEBUG
+        # seq_id = torch.arange(pre_turn, dtype=torch.long, device=hidden_states_key.device)
+        # _context_mask = ((pre_turn - 1 - seq_id[None, :]) < seq_id[:, None]).to(dtype=hidden_states_key.dtype)
+        # # (max_turn, pre_turn)
+        # _context_mask = torch.cat([_context_mask, _context_mask.new_ones((max_turn - pre_turn, pre_turn))], dim=0)
+        # # logger.info(_context_mask)
+        # _context_mask = _context_mask[None, :, :, None].expand(ds, -1, -1, seq_len).reshape(bs, 1, 1, pre_turn * seq_len)
+        # _context_mask = (1 - _context_mask) * -10000.0
+
+        context_index = torch.arange(max_turn, dtype=torch.long, device=key.device).unsqueeze(-1)  # (max_turn, pre_turn)
+        # (max_turn, pre_turn)
+        _offset = torch.arange(start=pre_turn, end=0, step=-1, dtype=torch.long, device=key.device).unsqueeze(0)
+        context_index = context_index - _offset
+
+        # # out of context dimension will be clamped as -1
+        # context_mask = (context_index.clamp(-1, 0).to(dtype=key.dtype) * 10000.0)
+        # # logger.info(context_mask)
+        # context_mask = context_mask[None, :, :, None].expand(ds, -1, -1, seq_len)
+        # context_mask = context_mask.reshape(bs, 1, 1, pre_turn * seq_len)
+        # # assert context_mask.data.tolist() == _context_mask.data.tolist(), (_context_mask, context_mask)
+
+        context_index[context_index < 0] = 0
+        context_index = context_index.view(-1)
+
+        # self_len = attention_mask.size(2)
+        # context_attention_mask = attention_mask.view(ds, max_turn, self_len, seq_len).index_select(index=context_index, dim=1)
+        # context_attention_mask = context_attention_mask.reshape(bs, pre_turn, self_len, seq_len).transpose(1, 2)
+        # context_attention_mask = context_attention_mask.reshape(bs, 1, self_len, pre_turn * seq_len)
+        # attention_mask = torch.cat([context_mask + context_attention_mask, attention_mask], dim=-1)
+
+        context_key = key.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1)
+        context_value = value.index_select(index=context_index, dim=1).reshape(bs, pre_turn * seq_len, -1)
+        return context_key, context_value
+
+    @staticmethod
+    def get_context_mask(attention_mask, pre_turn, max_turn):
+        bs = attention_mask.size(0)
+        ds = bs // max_turn
+        seq_len = attention_mask.size(-1)
+
+        context_index = torch.arange(max_turn, dtype=torch.long, device=attention_mask.device).unsqueeze(-1)  # (max_turn, pre_turn)
+        # (max_turn, pre_turn)
+        _offset = torch.arange(start=pre_turn, end=0, step=-1, dtype=torch.long, device=attention_mask.device).unsqueeze(0)
+        context_index = context_index - _offset
+
+        # out of context dimension will be clamped as -1
+        context_mask = (context_index.clamp(-1, 0).to(dtype=attention_mask.dtype) * 10000.0)
+        # logger.info(context_mask)
+        context_mask = context_mask[None, :, :, None].expand(ds, -1, -1, seq_len)
+        context_mask = context_mask.reshape(bs, 1, 1, pre_turn * seq_len)
+
+        context_index[context_index < 0] = 0
+        context_index = context_index.view(-1)
+
+        self_len = attention_mask.size(2)
+        context_attention_mask = attention_mask.view(ds, max_turn, self_len, seq_len).index_select(index=context_index, dim=1)
+        context_attention_mask = context_attention_mask.reshape(bs, pre_turn, self_len, seq_len).transpose(1, 2)
+        context_attention_mask = context_attention_mask.reshape(bs, 1, self_len, pre_turn * seq_len)
+        attention_mask = torch.cat([context_mask + context_attention_mask, attention_mask], dim=-1)
+
+        return attention_mask
+
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True, all_attn_cache=None,
+                use_context=False, pre_turn=0, max_turn=0, **kwargs):
         all_encoder_layers = []
         attn_caches = []
+
+        if use_context:
+            assert pre_turn > 0
+            assert max_turn > 0
+            attention_mask = self.get_context_mask(attention_mask, pre_turn, max_turn)
+            kwargs.update({
+                "use_context": use_context,
+                "pre_turn": pre_turn,
+                "max_turn": max_turn
+            })
+
         for layer_index, layer_module in enumerate(self.layer):
             if all_attn_cache is not None:
                 attn_cache = all_attn_cache[layer_index]
             else:
                 attn_cache = None
+
             hidden_states, attn_cache = layer_module(hidden_states, attention_mask, attn_cache=attn_cache, **kwargs)
+
             attn_caches.append(attn_cache)
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
@@ -630,7 +831,8 @@ class BertModel(BertPreTrainedModel):
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, position_ids=None,
                 output_all_encoded_layers=True,
-                start_offset=0, all_attn_cache=None, **kwargs):
+                start_offset=0, all_attn_cache=None,
+                pre_turn=0, **kwargs):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
         if token_type_ids is None:
@@ -656,12 +858,16 @@ class BertModel(BertPreTrainedModel):
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
-        embedding_output = self.embeddings(input_ids, token_type_ids, position_ids=position_ids,
-                                           start_offset=start_offset)
+        embedding_output, turn_embedding = self.embeddings(input_ids, token_type_ids, position_ids=position_ids,
+                                                        start_offset=start_offset, pre_turn=pre_turn)
+
+        if turn_embedding is not None:
+            kwargs["turn_embedding"] = turn_embedding
+
         encoded_layers, attn_caches = self.encoder(embedding_output,
                                                    extended_attention_mask,
                                                    output_all_encoded_layers=output_all_encoded_layers,
-                                                   all_attn_cache=all_attn_cache,
+                                                   all_attn_cache=all_attn_cache, pre_turn=pre_turn,
                                                    **kwargs)
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)

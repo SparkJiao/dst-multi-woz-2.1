@@ -59,8 +59,7 @@ class BeliefTracker(nn.Module):
             self_attention_type=args.self_attention_type
         )
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
-        self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob if args.dropout is None else args.dropout
-        logger.info(f'Dropout prob: {self.hidden_dropout_prob}')
+        self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
         if args.fix_utterance_encoder:
             for p in self.utterance_encoder.bert.pooler.parameters():
                 p.requires_grad = False
@@ -80,7 +79,6 @@ class BeliefTracker(nn.Module):
         # NBT
         nbt_config = self.sv_encoder.config
         nbt_config.num_attention_heads = self.attn_head
-        nbt_config.hidden_dropout_prob = self.hidden_dropout_prob
         logger.info(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         logger.info(f"Dialog Self Attention add residual: {args.sa_add_residual}")
         last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
@@ -107,14 +105,12 @@ class BeliefTracker(nn.Module):
                 self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                                 add_layer_norm=args.sa_add_layer_norm,
                                                                 add_residual=args.sa_add_residual,
-                                                                self_attention=last_attention,
-                                                                no_position_embedding=args.sa_no_position_embedding)
+                                                                self_attention=last_attention)
             else:
                 self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                                 add_layer_norm=args.sa_add_layer_norm,
-                                                                add_residual=args.sa_add_residual,
-                                                                no_position_embedding=args.sa_no_position_embedding)
-            if not args.sa_no_position_embedding and args.share_position_weight:
+                                                                add_residual=args.sa_add_residual)
+            if args.share_position_weight:
                 self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         logger.info(f'Value attention heads num: {args.value_attn_head}')
@@ -135,11 +131,6 @@ class BeliefTracker(nn.Module):
         self.graph_attention = layers.Attention(nbt_config, add_output=args.graph_add_output,
                                                 add_layer_norm=args.graph_add_layer_norm, use_residual=args.graph_add_residual)
         self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform)
-
-        logger.info(f'If use hard attention in graph connecting: {args.graph_hard_attn}')
-        self.graph_hard_attention = args.graph_hard_attn
-        logger.info(f'If use reinforcement learning to optimize: {args.use_rl}')
-        self.use_rl = args.use_rl
 
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
@@ -236,16 +227,31 @@ class BeliefTracker(nn.Module):
                 self.value_lookup[s].padding_idx = -1
                 max_value_num = max(max_value_num, hid_label.size(0))
                 value_list.append(hid_label)
+
+        # [CLS] no value [SEP]
+        no_value_ids = [101, 2053, 3643, 102]
+        no_value_ids = no_value_ids + [0] * (label_ids[0].size(0) - 4)
+        no_value_ids = torch.tensor(no_value_ids, device=self.device, dtype=torch.long)
+        no_value_type_ids = no_value_ids.new_zeros(no_value_ids.size())
+        no_value_mask = no_value_ids > 0
+        no_value_label, _, _ = self.sv_encoder(no_value_ids.unsqueeze(0),
+                                               no_value_type_ids.unsqueeze(0),
+                                               no_value_mask.unsqueeze(0),
+                                               output_all_encoded_layers=False, start_offset=0, all_attn_cache=None)
+        no_value_label = no_value_label[:, 0, :].squeeze(0)
+
         del self.sv_encoder
         torch.cuda.empty_cache()
 
-        value_tensor = torch.zeros((slot_ids.size(0), max_value_num, self.bert_output_dim),
+        # add `no value` label at index 0
+        value_tensor = torch.zeros((slot_ids.size(0), max_value_num + 1, self.bert_output_dim),
                                    dtype=value_list[0].dtype, device=self.device)
-        value_mask = torch.zeros((slot_ids.size(0), max_value_num), dtype=torch.long, device=self.device)
+        value_mask = torch.zeros((slot_ids.size(0), max_value_num + 1), dtype=torch.long, device=self.device)
         for s, value in enumerate(value_list):
             value_num = value.size(0)
-            value_tensor[s, :value_num] = value
-            value_mask[s, :value_num] = value.new_ones(value.size()[:-1], dtype=torch.long)
+            value_tensor[s, 0] = no_value_label
+            value_tensor[s, 1:(value_num + 1)] = value
+            value_mask[s, :(value_num + 1)] = value.new_ones(value_num + 1, dtype=torch.long)
         self.register_buffer("defined_values", value_tensor)
         self.register_buffer("value_mask", value_mask)
 
@@ -373,8 +379,7 @@ class BeliefTracker(nn.Module):
             graph_mask = graph_mask + diag_mask[None, None, :, :]
         if self.inter_domain:
             graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
-        graph_hidden, (_, _, _, graph_scores) = self.graph_attention(graph_query, graph_key, graph_value, graph_mask,
-                                                                     hard=self.graph_hard_attention)
+        graph_hidden, (_, _, _, graph_scores) = self.graph_attention(graph_query, graph_key, graph_value, graph_mask)
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
 
         # Fusion
@@ -441,8 +446,14 @@ class BeliefTracker(nn.Module):
                 loss += _loss
 
                 if self.graph_value_sup > 0:
+                    # add `no value` labels: set offset = 1
+                    negative_mask = (masked_slot_labels_for_loss == -1)
+                    off_labels = masked_slot_labels_for_loss + 1
+                    no_value_mask = ((answer_type_ids[:, :, s] == 0) | (answer_type_ids[:, :, s] == 1))
+                    off_labels[negative_mask] = -1  # set previous -1 labels still as -1
+                    off_labels[no_value_mask] = 0  # set no value positions as 0
                     graph_value_loss = nn.functional.nll_loss(masked_value_scores[s].view(bs, -1),
-                                                              masked_slot_labels_for_loss.view(-1), ignore_index=-1,
+                                                              off_labels.view(-1), ignore_index=-1,
                                                               reduction='sum') / ds
                     graph_value_loss = self.graph_value_sup * graph_value_loss
                     loss += graph_value_loss

@@ -622,6 +622,7 @@ def main():
     parser.add_argument('--fix_bert', default=False, action='store_true')
     parser.add_argument('--reduce_layers', default=0, type=int)
     parser.add_argument('--sa_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--sa_add_residual', default=False, action='store_true')
     parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--across_slot', default=False, action='store_true')
     parser.add_argument('--override_attn', default=False, action='store_true')
@@ -650,6 +651,7 @@ def main():
     parser.add_argument('--cls_loss_weight', default=1., type=float)
     parser.add_argument('--hidden_output', default=False, action='store_true')
     parser.add_argument('--dropout', default=None, type=float)
+    parser.add_argument('--sa_no_position_embedding', default=False, action='store_true')
 
     parser.add_argument('--use_context', default=False, action='store_true')
     parser.add_argument('--pre_turn', default=2, type=int)
@@ -662,6 +664,15 @@ def main():
     parser.add_argument('--extra_nbt', default=False, action='store_true')
     parser.add_argument('--graph_add_sup', default=0., type=float)
     parser.add_argument('--graph_value_sup', default=0., type=float)
+    parser.add_argument('--graph_attn_head', default=1, type=int)
+    parser.add_argument('--graph_add_output', default=False, action='store_true')
+    parser.add_argument('--graph_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--graph_add_residual', default=False, action='store_true')
+    parser.add_argument('--graph_hard_attn', default=False, action='store_true')
+    parser.add_argument('--value_attn_head', default=1, type=int)
+    parser.add_argument('--value_attn_output', default=False, action='store_true')
+    parser.add_argument('--value_attn_layer_norm', default=False, action='store_true')
+    parser.add_argument('--value_attn_residual', default=False, action='store_true')
 
     parser.add_argument('--detach', default=False, action='store_true')
 
@@ -866,12 +877,24 @@ def main():
         from BeliefTrackerShareSA_flat_xl import BeliefTracker
     elif args.nbt == 'flat_xl2':
         from BeliefTrackerShareSA_flat_xl2 import BeliefTracker
+    elif args.nbt == 'flat_xl3':
+        from BeliefTrackerShareSA_flat_xl3 import BeliefTracker
+    elif args.nbt == 'flat_xl4':
+        from BeliefTrackerShareSA_flat_xl4 import BeliefTracker
+    elif args.nbt == 'flat_xl5':
+        from BeliefTrackerShareSA_flat_xl5 import BeliefTracker
+    elif args.nbt == 'flat_xl6':
+        from BeliefTrackerShareSA_flat_xl6 import BeliefTracker
     elif args.nbt == 'hie_pp':
         from BeliefTrackerShareSA_pp_hie_cls import BeliefTracker
     elif args.nbt == 'graph':
         from BeliefTrackerShareSA_cls_graph import BeliefTracker
     elif args.nbt == 'graph2':
         from BeliefTrackerShareSA_cls_graph2 import BeliefTracker
+    elif args.nbt == 'graph2_no':
+        from BeliefTrackerShareSA_cls_graph2_no import BeliefTracker
+    elif args.nbt == 'graph2_gate':
+        from BeliefTrackerShareSA_cls_graph2_gate import BeliefTracker
     elif args.nbt == 'graph3':
         from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
     elif args.nbt == 'graph4':

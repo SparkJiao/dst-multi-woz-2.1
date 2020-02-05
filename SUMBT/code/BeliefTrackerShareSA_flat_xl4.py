@@ -8,11 +8,11 @@ from torch.nn import CrossEntropyLoss
 
 try:
     from . import layers
-    from .modeling_bert_xl2 import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from .modeling_bert_xl4 import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from .global_logger import get_child_logger
 except ImportError:
     import layers
-    from modeling_bert_xl2 import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from modeling_bert_xl4 import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from global_logger import get_child_logger
 
 logger: Logger = get_child_logger(__name__)
@@ -85,15 +85,11 @@ class BeliefTracker(nn.Module):
             logger.info("Override self attention from last layer of BERT")
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual,
-                                                         self_attention=last_attention,
-                                                         no_position_embedding=args.sa_no_position_embedding)
+                                                         self_attention=last_attention)
         else:
             self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                         add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual,
-                                                         no_position_embedding=args.sa_no_position_embedding)
-        if not args.sa_no_position_embedding and args.share_position_weight:
+                                                         add_layer_norm=args.sa_add_layer_norm)
+        if args.share_position_weight:
             logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
@@ -125,8 +121,6 @@ class BeliefTracker(nn.Module):
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
         self.pre_turn = args.pre_turn
         logger.info(f"XL extended previous turns: {args.pre_turn}")
-        self.detach = args.detach
-        logger.info(f"If detach the hidden states from last layer: {self.detach}")
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -186,7 +180,7 @@ class BeliefTracker(nn.Module):
                                                       token_type_ids.view(-1, self.max_seq_length),
                                                       attention_mask.view(-1, self.max_seq_length),
                                                       output_all_encoded_layers=False, use_context=True,
-                                                      max_turn=ts, pre_turn=self.pre_turn, detach=self.detach)
+                                                      max_turn=ts, pre_turn=self.pre_turn)
 
         # Domain-slot encoding
         slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)

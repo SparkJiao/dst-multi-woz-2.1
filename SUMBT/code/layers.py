@@ -6,6 +6,7 @@ from pytorch_pretrained_bert.modeling import gelu
 from pytorch_pretrained_bert.modeling import BertConfig
 from torch import nn
 from torch.nn import functional as F
+from torch import distributions
 
 try:
     from .global_logger import get_child_logger
@@ -110,7 +111,7 @@ class MultiHeadAttention(nn.Module):
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, query, key, value, attention_mask, return_score: bool = False):
+    def forward(self, query, key, value, attention_mask, return_score: bool = False, hard: bool = False):
         mixed_query_layer = self.query(query)
         mixed_key_layer = self.key(key)
         mixed_value_layer = self.value(value)
@@ -131,7 +132,14 @@ class MultiHeadAttention(nn.Module):
         attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
-        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+        if hard:
+            if self.training:
+                attention_probs = F.gumbel_softmax(attention_scores, hard=True, dim=-1)
+            else:
+                index = attention_scores.max(dim=-1, keepdim=True)[1]
+                attention_probs = torch.zeros_like(attention_scores).scatter_(-1, index, 1.0)
+        else:
+            attention_probs = nn.Softmax(dim=-1)(attention_scores)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -148,16 +156,22 @@ class Attention(nn.Module):
     def __init__(self, config: BertConfig, add_output: bool = True, use_residual: bool = False, add_layer_norm: bool = False):
         super(Attention, self).__init__()
         self.multi_head_attention = MultiHeadAttention(config)
-        self.linear = nn.Linear(config.hidden_size, config.hidden_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+
+        logger.info(f'Attention hyper-parameters:\n'
+                    f'add_output: {add_output}, use_residual: {use_residual}, add_layer_norm: {add_layer_norm}')
 
         self.use_residual = use_residual
         self.add_layer_norm = add_layer_norm
         self.add_output = add_output
 
-    def forward(self, query, key, value, attention_mask):
-        hidden, _ = self.multi_head_attention(query, key, value, attention_mask)
+        if self.add_output:
+            self.linear = nn.Linear(config.hidden_size, config.hidden_size)
+            self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        if self.add_layer_norm:
+            self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+
+    def forward(self, query, key, value, attention_mask, hard=False):
+        hidden, qkv = self.multi_head_attention(query, key, value, attention_mask, hard=hard)
 
         if self.add_output:
             hidden = self.dropout(self.linear(hidden))
@@ -165,7 +179,7 @@ class Attention(nn.Module):
             if self.use_residual:
                 hidden = query + hidden
             hidden = self.LayerNorm(hidden)
-        return hidden
+        return hidden, qkv
 
 
 class DynamicFusion(nn.Module):
@@ -200,6 +214,51 @@ class DynamicFusion(nn.Module):
         fusion = self.act_fn(self.fuse_f(z))
         res = gate * fusion + (1 - gate) * x
         # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res
+
+
+class DynamicGate(nn.Module):
+    def __init__(self, input_size, gate_type: int = 0):
+        super(DynamicGate, self).__init__()
+
+        logger.info(f'{self.__class__.__name__} parameters:\n'
+                    f'Gate type: {gate_type}\n')
+        # `gate_type`:
+        #     0: element-wise fusion (soft)
+        #     1: item-wise fusion (soft)
+        #     2: item-wise fusion (hard + gumbel softmax)
+        #     3: item-wise fusion (hard + RL)
+        self.gate_type = gate_type
+        if gate_type == 0:
+            self.gate_f = nn.Linear(input_size * 4, input_size)
+        elif gate_type == 1:
+            self.gate_f = nn.Linear(input_size * 4, 1)
+        elif gate_type in [2, 3]:
+            self.gate_f = nn.Linear(input_size * 4, 2)
+        else:
+            raise RuntimeError()
+
+    def forward(self, x, y):
+        """
+        :param x: initial sequence
+        :param y: attended sequence
+        :return: fused sequence
+        """
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        if self.gate_type == 0 or self.gate_type == 1:
+            g = torch.sigmoid(self.gate_f(z))
+            res = g * x + (1 - g) * y
+        elif self.gate_type == 2:
+            gate = self.gate_f(z)
+            if self.training:
+                g = F.gumbel_softmax(gate, hard=True, dim=-1)
+            else:
+                index = gate.max(dim=-1, keepdim=True)[1]
+                g = torch.zeros_like(gate).scatter_(-1, index, 1.0)
+            # g: (*, seq, 2)
+            res = torch.matmul(g.unsqueeze(-2), torch.stack([x, y], dim=-2)).squeeze(-2)
+        else:
+            pass
         return res
 
 
@@ -676,3 +735,23 @@ def get_restaurant_attraction_mask(mask_self: bool = False):
                 domain_mask[x, x] = 0
 
     return domain_mask
+
+
+def sample_one_hot(similarity, sample_num, training: bool):
+    _probability = torch.softmax(similarity)
+    dtype = _probability.dtype
+    _probability = _probability.to(dtype=torch.float)
+    if training:
+        _distribution = distributions.Categorical(probs=_probability)
+        _sample_index = _distribution.sample((sample_num,))
+        new_shape = (sample_num,) + similarity.size()
+        _sample_one_hot = F.one_hot(_sample_index, num_classes=similarity.size(-1))
+        _log_prob = _distribution.log_prob(_sample_index)
+        assert _log_prob.size() == new_shape[:-1], (_log_prob.size(), new_shape)
+        return _sample_one_hot.to(dtype=dtype), _log_prob.to(dtype=dtype)
+    else:
+        _max_index = _probability.max(dim=-1, keepdim=True)[1]
+        _one_hot = F.one_hot(_max_index, num_classes=_probability.size(-1))
+        return _one_hot, None
+
+

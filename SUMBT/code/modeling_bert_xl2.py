@@ -878,34 +878,45 @@ class DialogTransformer(BertPreTrainedModel):
 
 
 class SimpleDialogSelfAttention(BertPreTrainedModel):
-    def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False,
-                 self_attention: BertSelfAttention = None):
+    def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False, add_residual: bool = False,
+                 self_attention: BertSelfAttention = None, no_position_embedding: bool = False):
         super(SimpleDialogSelfAttention, self).__init__(config)
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.no_position_embedding = no_position_embedding
+        logger.info(f'If remove position embedding: {self.no_position_embedding}')
+        if not self.no_position_embedding:
+            self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+            self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+            self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+
         if self_attention is not None:
             self.sa = copy.deepcopy(self_attention)
         else:
             self.sa = BertSelfAttention(config)
         # self.sa = BertSelfAttention(config)
         self.add_output = add_output
+        self.add_layer_norm = add_layer_norm
+        self.add_residual = add_residual
         if add_output:
             output_module_list = [nn.Linear(config.hidden_size, config.hidden_size),
                                   nn.Dropout(config.hidden_dropout_prob)]
-            if add_layer_norm:
-                output_module_list.append(nn.LayerNorm(config.hidden_size, eps=1e-12))
+            # if add_layer_norm:
+            #     output_module_list.append(nn.LayerNorm(config.hidden_size, eps=1e-12))
             self.sa_output = nn.Sequential(*output_module_list)
-        else:
-            self.sa_output = None
+            if self.add_layer_norm:
+                self.saLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        # else:
+        #     self.sa_output = None
         self.apply(self.init_bert_weights)
 
     def forward(self, hidden, attention_mask=None):
+
         seq_length = hidden.size(1)
         position_ids = torch.arange(seq_length, dtype=torch.long, device=hidden.device)
-        hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids).unsqueeze(0).expand_as(hidden))
-        hidden = self.dropout(hidden)
+        if not self.no_position_embedding:
+            hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids).unsqueeze(0).expand_as(hidden))
+            hidden = self.dropout(hidden)
 
         if attention_mask is None:
             attention_mask = hidden.new_ones(hidden.size()[:-1], dtype=torch.long)
@@ -914,11 +925,15 @@ class SimpleDialogSelfAttention(BertPreTrainedModel):
         extended_mask = extended_mask.to(hidden.dtype)
         extended_mask = (1.0 - extended_mask) * -10000.0
 
-        hidden, _ = self.sa(hidden, extended_mask)
+        sa_hidden, _ = self.sa(hidden, extended_mask)
         if self.add_output:
-            hidden = self.sa_output(hidden)
+            sa_hidden = self.sa_output(sa_hidden)
+            if self.add_layer_norm:
+                if self.add_residual:
+                    sa_hidden = hidden + sa_hidden
+                sa_hidden = self.saLayerNorm(sa_hidden)
 
-        return hidden
+        return sa_hidden
 
 
 class SimpleSelfAttention(BertPreTrainedModel):
