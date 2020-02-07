@@ -712,29 +712,22 @@ class SimpleDialogSelfAttention(BertPreTrainedModel):
 
             self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
 
-        if self_attention is not None:
-            self.sa = copy.deepcopy(self_attention)
-        else:
-            self.sa = BertSelfAttention(config)
-        # self.sa = BertSelfAttention(config)
+        self.sa = BertSelfAttention(config)
         self.add_output = add_output
         self.add_layer_norm = add_layer_norm
         self.add_residual = add_residual
         if add_output:
             output_module_list = [nn.Linear(config.hidden_size, config.hidden_size),
                                   nn.Dropout(config.hidden_dropout_prob)]
-            # if add_layer_norm:
-            #     output_module_list.append(nn.LayerNorm(config.hidden_size, eps=1e-12))
+
             self.sa_output = nn.Sequential(*output_module_list)
             if self.add_layer_norm:
                 self.saLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
-        # else:
-        #     self.sa_output = None
-        # FIXME: The initialization may affect the `self.sa` if it's a copy of pre-trained module.
-        #  Test the performance:
-        #  1. Uses the initialization before override self attention
-        #  2. Only initialise the `bias` after override
+
         self.apply(self.init_bert_weights)
+
+        if self_attention is not None:
+            self.sa = copy.deepcopy(self_attention)
 
     def forward(self, hidden, attention_mask=None):
 

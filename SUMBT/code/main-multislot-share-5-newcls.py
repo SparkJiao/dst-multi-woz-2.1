@@ -679,6 +679,19 @@ def main():
     parser.add_argument('--override_attn_extra', default=False, action='store_true')
     parser.add_argument('--fusion_no_transform', default=False, action='store_true')
 
+    parser.add_argument('--context_agg', default=False, action='store_true')
+    parser.add_argument('--context_agg_fusion', default=False, action='store_true')
+    parser.add_argument('--fuse_type', default=0, type=int)
+    parser.add_argument('--diag_attn_hidden_scale', default=2.0, type=float)
+
+    parser.add_argument('--context_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--context_add_residual', default=False, action='store_true')
+    parser.add_argument('--ff_hidden_size', type=int, default=1536)
+    parser.add_argument('--ff_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--ff_add_residual', default=False, action='store_true')
+    parser.add_argument('--query_layer_norm', default=False, action='store_true')
+    parser.add_argument('--query_residual', default=False, action='store_true')
+
     args = parser.parse_args()
 
     # check output_dir
@@ -903,6 +916,12 @@ def main():
         from BeliefTrackerShareSA_cls_graph_re import BeliefTracker
     elif args.nbt == 's_xl':
         from BeliefTrackerShareSA_flat_s_xl import BeliefTracker
+    elif args.nbt == 'context':
+        from BeliefTrackerShareSA_cls_context import BeliefTracker
+    elif args.nbt == 'context_verify':
+        from BeliefTrackerShareSA_cls_context_verify import BeliefTracker
+    elif args.nbt == 'context_stacked':
+        from BeliefTrackerShareSA_cls_context_stacked import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

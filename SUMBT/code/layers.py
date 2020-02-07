@@ -1,12 +1,13 @@
-import math
 import logging
+import math
+import copy
 
 import torch
-from pytorch_pretrained_bert.modeling import gelu
-from pytorch_pretrained_bert.modeling import BertConfig
-from torch import nn
-from torch.nn import functional as F
+from pytorch_pretrained_bert.modeling import BertConfig, BertPreTrainedModel, gelu, BertSelfAttention, BertLayerNorm
 from torch import distributions
+from torch import nn
+from torch.nn import Parameter
+from torch.nn import functional as F
 
 try:
     from .global_logger import get_child_logger
@@ -536,6 +537,93 @@ class PropAttention(nn.Module):
         return hidden, scores
 
 
+class DiagonalAttentionScore(nn.Module):
+    """
+    s_ij = Relu(Wx1)DRelu(Wx2)
+    """
+
+    def __init__(self, input_size, hidden_size, dropout=0.1, do_similarity=False):
+        super(DiagonalAttentionScore, self).__init__()
+        self.hidden_size = hidden_size
+
+        self.linear = nn.Linear(input_size, hidden_size, bias=False)
+        if do_similarity:
+            self.diagonal = Parameter(torch.ones(1, 1, 1) / (hidden_size ** 0.5), requires_grad=False)
+        else:
+            self.diagonal = Parameter(torch.ones(1, 1, hidden_size), requires_grad=True)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x1, x2):
+        x1 = self.dropout(x1)
+        x2 = self.dropout(x2)
+
+        x1_rep = torch.relu(self.linear(x1))
+        x2_rep = torch.relu(self.linear(x2))
+        x1_rep = x1_rep * self.diagonal.expand_as(x1_rep)
+
+        return x1_rep.bmm(x2_rep.transpose(1, 2))
+
+
+class DiagonalAttention(nn.Module):
+    def __init__(self, input_size, hidden_size, dropout=0.1, do_similarity=False):
+        super(DiagonalAttention, self).__init__()
+        self.scoring = DiagonalAttentionScore(input_size, hidden_size, dropout=dropout, do_similarity=do_similarity)
+
+    def forward(self, x1, x2, x2_mask=None, x3=None, drop_diagonal=False):
+        if x3 is None:
+            x3 = x2
+
+        scores = self.scoring(x1, x2)
+
+        if x2_mask is None:
+            x2_mask = x2.new_ones((x2.size(0), 1, x2.size(1)), dtype=torch.long)
+        else:
+            if x2_mask.dim() == 2:
+                x2_mask = x2_mask.unsqueeze(1)
+
+        if drop_diagonal:
+            assert scores.size(1) == scores.size(2)
+            diagonal_mask = 1 - torch.diag(x2.new_ones(x2.size(1), dtype=torch.long), diagonal=0).unsqueeze(0)
+            x2_mask = diagonal_mask * x2_mask
+
+        x2_mask = x2_mask.to(dtype=x2.dtype)
+        x2_mask = (1.0 - x2_mask) * -10000.0
+        scores = scores + x2_mask
+
+        alpha = torch.softmax(scores, dim=-1)
+        res = alpha.bmm(x3)
+
+        return res
+
+
+class FeedForwardNetwork(nn.Module):
+    def __init__(self, input_size, hidden_size, act_fn=gelu, dropout: float = 0.1,
+                 add_layer_norm: bool = False, add_residual: bool = False):
+        super(FeedForwardNetwork, self).__init__()
+
+        self.ff_1 = nn.Linear(input_size, hidden_size)
+        self.act_fn = act_fn
+        self.ff_2 = nn.Linear(hidden_size, input_size)
+
+        self.add_layer_norm = add_layer_norm
+        self.add_residual = add_residual
+        if self.add_layer_norm:
+            self.LayerNorm = BertLayerNorm(input_size, eps=1e-12)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        h = self.dropout(self.ff_2(self.act_fn(self.ff_1(x))))
+
+        if self.add_residual:
+            h = x + h
+        if self.add_layer_norm:
+            h = self.LayerNorm(h)
+
+        return h
+
+
+
 # ===============================
 # Function
 # ===============================
@@ -753,5 +841,3 @@ def sample_one_hot(similarity, sample_num, training: bool):
         _max_index = _probability.max(dim=-1, keepdim=True)[1]
         _one_hot = F.one_hot(_max_index, num_classes=_probability.size(-1))
         return _one_hot, None
-
-
