@@ -105,9 +105,12 @@ class BeliefTracker(nn.Module):
         self.dialog_query = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
         self.init_bert_weights(self.dialog_query)
         # Context modeling and aggregation
+        self.context_override_attn = args.context_override_attn
+        logger.info(f'If context modeling layer override self attention from last layer of BERT: {self.context_override_attn}')
         self.context_flow1 = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                        add_layer_norm=args.context_add_layer_norm,
-                                                       add_residual=args.context_add_residual)
+                                                       add_residual=args.context_add_residual,
+                                                       self_attention=(None if not self.context_override_attn else last_attention))
         self.context_flow1.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
         self.context_query1 = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
         self.context_query_output1 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
@@ -124,7 +127,8 @@ class BeliefTracker(nn.Module):
 
         self.context_flow2 = SimpleDialogSelfAttention(nbt_config, add_output=True,
                                                        add_layer_norm=args.context_add_layer_norm,
-                                                       add_residual=args.context_add_residual)
+                                                       add_residual=args.context_add_residual,
+                                                       self_attention=(None if not self.context_override_attn else last_attention))
         self.context_flow2.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
         self.context_query2 = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
         self.context_query_output2 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
@@ -303,7 +307,7 @@ class BeliefTracker(nn.Module):
         attention_mask = ids > 0
         return token_type_ids, attention_mask
 
-    def stack_query(self, flow_module, query_module, ff_module, slot_dim, ds, ts, hidden, query_vector, query_layer_norm=None):
+    def stack_query(self, flow_module, query_module, query_out, ff_module, slot_dim, ds, ts, hidden, query_vector, query_layer_norm=None):
         hidden = flow_module(hidden, None)
         assert hidden.size()[:-1] == (slot_dim * ds, ts), hidden.size()
 
@@ -311,6 +315,7 @@ class BeliefTracker(nn.Module):
 
         query_input = hidden.view(slot_dim, ds * ts, -1).transpose(0, 1).contiguous()
         query_output = query_module(query_vector, query_input, x2_mask=None, drop_diagonal=self.mask_self)
+        query_output = self.dropout(query_out(query_output))
         if self.context_query_residual:
             query_output = query_input + query_output
         if self.context_query_layer_norm:
@@ -364,10 +369,10 @@ class BeliefTracker(nn.Module):
         # Context modeling and aggregation
         hidden_d = hidden_d.transpose(0, 1).reshape(slot_dim * ds, ts, -1)
 
-        hidden_d = self.stack_query(self.context_flow1, self.context_query1, self.context_ff1,
+        hidden_d = self.stack_query(self.context_flow1, self.context_query1, self.context_query_output1, self.context_ff1,
                                     slot_dim, ds, ts, hidden_d, slot_hidden, self.contextQueryLayerNorm1)
         hidden_d = hidden_d.view(slot_dim * ds, ts, -1)
-        hidden_d = self.stack_query(self.context_flow2, self.context_query2, self.context_ff2,
+        hidden_d = self.stack_query(self.context_flow2, self.context_query2, self.context_query_output2, self.context_ff2,
                                     slot_dim, ds, ts, hidden_d, slot_hidden, self.contextQueryLayerNorm2)
 
         # Fuse

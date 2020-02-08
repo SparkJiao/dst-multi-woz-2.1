@@ -691,6 +691,7 @@ def main():
     parser.add_argument('--ff_add_residual', default=False, action='store_true')
     parser.add_argument('--query_layer_norm', default=False, action='store_true')
     parser.add_argument('--query_residual', default=False, action='store_true')
+    parser.add_argument('--context_override_attn', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -922,6 +923,8 @@ def main():
         from BeliefTrackerShareSA_cls_context_verify import BeliefTracker
     elif args.nbt == 'context_stacked':
         from BeliefTrackerShareSA_cls_context_stacked import BeliefTracker
+    elif args.nbt == 'context_stacked2':
+        from BeliefTrackerShareSA_cls_context_stacked2 import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
