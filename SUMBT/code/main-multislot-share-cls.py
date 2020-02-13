@@ -598,6 +598,7 @@ def main():
     parser.add_argument('--fix_bert', default=False, action='store_true')
     parser.add_argument('--reduce_layers', default=0, type=int)
     parser.add_argument('--sa_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--sa_add_residual', default=False, action='store_true')
     parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--across_slot', default=False, action='store_true')
     parser.add_argument('--override_attn', default=False, action='store_true')
@@ -627,6 +628,7 @@ def main():
     parser.add_argument('--cls_loss_weight', default=1., type=float)
     parser.add_argument('--hidden_output', default=False, action='store_true')
     parser.add_argument('--dropout', default=None, type=float)
+    parser.add_argument('--sa_no_position_embedding', default=False, action='store_true')
 
     parser.add_argument('--use_context', default=False, action='store_true')
     parser.add_argument('--pre_turn', default=2, type=int)
@@ -639,8 +641,35 @@ def main():
     parser.add_argument('--extra_nbt', default=False, action='store_true')
     parser.add_argument('--graph_add_sup', default=0., type=float)
     parser.add_argument('--graph_value_sup', default=0., type=float)
+    parser.add_argument('--graph_attn_head', default=1, type=int)
+    parser.add_argument('--graph_add_output', default=False, action='store_true')
+    parser.add_argument('--graph_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--graph_add_residual', default=False, action='store_true')
+    parser.add_argument('--graph_hard_attn', default=False, action='store_true')
+    parser.add_argument('--use_rl', default=False, action='store_true')
+    parser.add_argument('--value_attn_head', default=1, type=int)
+    parser.add_argument('--value_attn_output', default=False, action='store_true')
+    parser.add_argument('--value_attn_layer_norm', default=False, action='store_true')
+    parser.add_argument('--value_attn_residual', default=False, action='store_true')
 
     parser.add_argument('--detach', default=False, action='store_true')
+
+    parser.add_argument('--override_attn_extra', default=False, action='store_true')
+    parser.add_argument('--fusion_no_transform', default=False, action='store_true')
+
+    parser.add_argument('--context_agg', default=False, action='store_true')
+    parser.add_argument('--context_agg_fusion', default=False, action='store_true')
+    parser.add_argument('--fuse_type', default=0, type=int)
+    parser.add_argument('--diag_attn_hidden_scale', default=2.0, type=float)
+
+    parser.add_argument('--context_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--context_add_residual', default=False, action='store_true')
+    parser.add_argument('--ff_hidden_size', type=int, default=1536)
+    parser.add_argument('--ff_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--ff_add_residual', default=False, action='store_true')
+    parser.add_argument('--query_layer_norm', default=False, action='store_true')
+    parser.add_argument('--query_residual', default=False, action='store_true')
+    parser.add_argument('--context_override_attn', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -855,6 +884,14 @@ def main():
         from BeliefTrackerShareSA_cls_graph_re import BeliefTracker
     elif args.nbt == 's_xl':
         from BeliefTrackerShareSA_flat_s_xl import BeliefTracker
+    elif args.nbt == 'context':
+        from BeliefTrackerShareSA_cls_context import BeliefTracker
+    elif args.nbt == 'context_verify':
+        from BeliefTrackerShareSA_cls_context_verify import BeliefTracker
+    elif args.nbt == 'context_stacked':
+        from BeliefTrackerShareSA_cls_context_stacked import BeliefTracker
+    elif args.nbt == 'context_stacked2':
+        from BeliefTrackerShareSA_cls_context_stacked2 import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

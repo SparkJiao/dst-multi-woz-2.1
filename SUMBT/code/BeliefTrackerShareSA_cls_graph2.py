@@ -9,11 +9,12 @@ from torch.nn import CrossEntropyLoss
 
 try:
     from . import layers
-    from .modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    # from .modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from .modeling_bert_extended_f import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from .global_logger import get_child_logger
 except ImportError:
     import layers
-    from modeling_bert_extended import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from modeling_bert_extended_f import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from global_logger import get_child_logger
 
 logger: Logger = get_child_logger(__name__)

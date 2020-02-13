@@ -662,6 +662,7 @@ def main():
     parser.add_argument('--inter_domain', default=False, action='store_true')
 
     parser.add_argument('--extra_nbt', default=False, action='store_true')
+    parser.add_argument('--extra_nbt_attn_head', default=6, type=int)
     parser.add_argument('--graph_add_sup', default=0., type=float)
     parser.add_argument('--graph_value_sup', default=0., type=float)
     parser.add_argument('--graph_attn_head', default=1, type=int)
@@ -669,6 +670,7 @@ def main():
     parser.add_argument('--graph_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--graph_add_residual', default=False, action='store_true')
     parser.add_argument('--graph_hard_attn', default=False, action='store_true')
+    parser.add_argument('--use_rl', default=False, action='store_true')
     parser.add_argument('--value_attn_head', default=1, type=int)
     parser.add_argument('--value_attn_output', default=False, action='store_true')
     parser.add_argument('--value_attn_layer_norm', default=False, action='store_true')
@@ -692,6 +694,8 @@ def main():
     parser.add_argument('--query_layer_norm', default=False, action='store_true')
     parser.add_argument('--query_residual', default=False, action='store_true')
     parser.add_argument('--context_override_attn', default=False, action='store_true')
+
+    parser.add_argument('--value_embedding_type', default='cls', type=str)
 
     args = parser.parse_args()
 
@@ -909,6 +913,8 @@ def main():
         from BeliefTrackerShareSA_cls_graph2_no import BeliefTracker
     elif args.nbt == 'graph2_gate':
         from BeliefTrackerShareSA_cls_graph2_gate import BeliefTracker
+    elif args.nbt == 'graph2_p':
+        from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
     elif args.nbt == 'graph3':
         from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
     elif args.nbt == 'graph4':
