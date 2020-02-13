@@ -110,16 +110,19 @@ class BeliefTracker(nn.Module):
                                                        add_residual=args.context_add_residual)
         self.context_flow1.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
         self.context_query1 = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
-        self.context_query_output1 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
+        # self.context_query_output1 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
         self.context_query_layer_norm = args.query_layer_norm
         self.context_query_residual = args.query_residual
         if self.context_query_layer_norm:
             self.contextQueryLayerNorm1 = BertLayerNorm(self.bert_output_dim, eps=1e-12)
+            self.init_bert_weights(self.contextQueryLayerNorm1)
+        else:
+            self.contextQueryLayerNorm1 = None
         self.context_ff1 = layers.FeedForwardNetwork(self.bert_output_dim, args.ff_hidden_size, dropout=self.hidden_dropout_prob,
                                                      add_layer_norm=args.ff_add_layer_norm, add_residual=args.ff_add_residual)
         self.init_bert_weights(self.context_query1)
-        self.init_bert_weights(self.context_query_output1)
-        self.init_bert_weights(self.contextQueryLayerNorm1)
+        # self.init_bert_weights(self.context_query_output1)
+
         self.init_bert_weights(self.context_ff1)
 
         self.context_flow2 = SimpleDialogSelfAttention(nbt_config, add_output=True,
@@ -127,14 +130,16 @@ class BeliefTracker(nn.Module):
                                                        add_residual=args.context_add_residual)
         self.context_flow2.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
         self.context_query2 = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
-        self.context_query_output2 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
+        # self.context_query_output2 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
         if self.context_query_layer_norm:
             self.contextQueryLayerNorm2 = BertLayerNorm(self.bert_output_dim, eps=1e-12)
+            self.init_bert_weights(self.contextQueryLayerNorm2)
+        else:
+            self.contextQueryLayerNorm2 = None
         self.context_ff2 = layers.FeedForwardNetwork(self.bert_output_dim, args.ff_hidden_size, dropout=self.hidden_dropout_prob,
                                                      add_layer_norm=args.ff_add_layer_norm, add_residual=args.ff_add_residual)
         self.init_bert_weights(self.context_query2)
-        self.init_bert_weights(self.context_query_output2)
-        self.init_bert_weights(self.contextQueryLayerNorm2)
+        # self.init_bert_weights(self.context_query_output2)
         self.init_bert_weights(self.context_ff2)
 
         logger.info(f'If drop self during re-query: {args.mask_self}')
