@@ -641,7 +641,7 @@ class StackedGraphLayer(nn.Module):
             self.fuse_layers.append(copy.deepcopy(fuse_layer))
             self.dialog_self_attention_layers.append(copy.deepcopy(dialog_self_attention))
 
-    def forward(self, hidden, values, value_mask, ds, ts, slot_dim):
+    def forward(self, hidden, values, value_mask, ds, ts, slot_dim, mask_self=False):
         """
 
         :param hidden: [slot_dim * ds * ts, h]
@@ -650,21 +650,17 @@ class StackedGraphLayer(nn.Module):
         :param ds:
         :param ts:
         :param slot_dim:
+        :param mask_self:
         :return:
         """
         bs = ds * ts
 
-        max_value_num = value_mask.size(1)
-        value_mask = value_mask[:, None, None, :]  # (slot_dim, 1, 1, max_value_num)
-        extended_value_mask = (1 - value_mask.to(dtype=hidden.dtype)) * -10000.0
-
-        graph_mask = hidden.new_zeros((ds * (ts - 1), slot_dim))[:, None, None, :]
-
         value_scores = []
+        graph_scores = []
         for i in range(self.num_layers):
             # value attention
-            value_hidden, (_, _, _, value_score) = self.value_attention_layers[i](hidden.view(slot_dim, bs, -1),
-                                                                                  values, values, extended_value_mask)
+            value_hidden, value_score = self.value_attention_layers[i](hidden.view(slot_dim, bs, -1),
+                                                                       values, x3=values, x2_mask=value_mask, return_scores=True)
             masked_value_score = masked_log_softmax_fp16(value_score, value_mask, dim=-1)
             value_scores.append(masked_value_score.view(slot_dim, ds, ts, -1))
 
@@ -674,15 +670,17 @@ class StackedGraphLayer(nn.Module):
             graph_query = flat_hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
             graph_key = flat_hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
 
-            # if self.mask_self:
-            #     diag_mask = torch.diag(graph_mask.new_ones(slot_dim).fill_(-10000.0), diagonal=0)
-            #     graph_mask = graph_mask + diag_mask[None, None, :, :]
-            # if self.inter_domain:
-            #     graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
-            graph_hidden, (_, _, _, graph_scores) = self.graph_attention(graph_query, graph_key, graph_value, graph_mask)
+            graph_hidden, graph_score = self.graph_attention_layers[i](graph_query, graph_key, x3=graph_value, x2_mask=None,
+                                                                        return_scores=True, drop_diagonal=mask_self)
             graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
+            graph_scores.append(graph_score)
 
-            pass
+            fused_hidden = self.fuse_layers[i](graph_hidden, flat_hidden[:, :, 1:])
+            hidden = torch.cat([flat_hidden[:, :, 0].unsqueeze(2), fused_hidden], dim=2).reshape(slot_dim * ds, ts, -1)
+
+            hidden = self.dialog_self_attention_layers[i](hidden, None)
+
+        return hidden.view(slot_dim, ds, ts, -1), value_scores, graph_scores
 
 # ===============================
 # Function

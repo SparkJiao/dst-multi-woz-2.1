@@ -1,6 +1,7 @@
 #!/bin/bash
 
-output_dir=exp-multiwoz/data2.0-cls-graph2/v1.11-hotel
+#output_dir=exp-multiwoz/data2.0-cls-graph2/v1.11-hotel
+output_dir=exp-multiwoz/data2.0-cls-graph2/v1.11-hotel-not-f  # import modeling_bert_extended
 target_slot='hotel'
 nbt='graph2'
 bert_dir='/home/jiaofangkai/'

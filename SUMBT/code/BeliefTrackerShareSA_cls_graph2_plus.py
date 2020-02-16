@@ -313,7 +313,7 @@ class BeliefTracker(nn.Module):
         # if self.inter_domain:
         #     graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
         graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=None,
-                                                                     drop_diagonal=self.mask_self, return_scores=True)
+                                                          drop_diagonal=self.mask_self, return_scores=True)
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
 
         # Fusion

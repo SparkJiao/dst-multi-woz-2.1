@@ -613,6 +613,7 @@ def main():
                         help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
                              "0 (default value): dynamic loss scaling.\n"
                              "Positive power of 2: static loss scaling value.\n")
+    parser.add_argument('--max_loss_scale', type=float, default=None)
     parser.add_argument("--do_not_use_tensorboard",
                         action='store_true',
                         help="Whether to run eval on the test set.")
@@ -915,6 +916,8 @@ def main():
         from BeliefTrackerShareSA_cls_graph2_gate import BeliefTracker
     elif args.nbt == 'graph2_p':
         from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
+    elif args.nbt == 'graph2_p_stack':
+        from BeliefTrackerShareSA_cls_graph2_plus_stack import BeliefTracker
     elif args.nbt == 'graph3':
         from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
     elif args.nbt == 'graph4':
@@ -990,7 +993,10 @@ def main():
                 from apex import amp
             except ImportError:
                 raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-            model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+            if args.max_loss_scale is not None:
+                model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level, max_loss_scale=args.max_loss_scale)
+            else:
+                model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
         logger.info(optimizer)
 

@@ -589,6 +589,7 @@ def main():
                         help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
                              "0 (default value): dynamic loss scaling.\n"
                              "Positive power of 2: static loss scaling value.\n")
+    parser.add_argument('--max_loss_scale', type=float, default=None)
     parser.add_argument("--do_not_use_tensorboard",
                         action='store_true',
                         help="Whether to run eval on the test set.")
@@ -639,6 +640,7 @@ def main():
     parser.add_argument('--inter_domain', default=False, action='store_true')
 
     parser.add_argument('--extra_nbt', default=False, action='store_true')
+    parser.add_argument('--extra_nbt_attn_head', default=6, type=int)
     parser.add_argument('--graph_add_sup', default=0., type=float)
     parser.add_argument('--graph_value_sup', default=0., type=float)
     parser.add_argument('--graph_attn_head', default=1, type=int)
@@ -670,6 +672,8 @@ def main():
     parser.add_argument('--query_layer_norm', default=False, action='store_true')
     parser.add_argument('--query_residual', default=False, action='store_true')
     parser.add_argument('--context_override_attn', default=False, action='store_true')
+
+    parser.add_argument('--value_embedding_type', default='cls', type=str)
 
     args = parser.parse_args()
 
@@ -876,6 +880,14 @@ def main():
         from BeliefTrackerShareSA_cls_graph import BeliefTracker
     elif args.nbt == 'graph2':
         from BeliefTrackerShareSA_cls_graph2 import BeliefTracker
+    elif args.nbt == 'graph2_no':
+        from BeliefTrackerShareSA_cls_graph2_no import BeliefTracker
+    elif args.nbt == 'graph2_gate':
+        from BeliefTrackerShareSA_cls_graph2_gate import BeliefTracker
+    elif args.nbt == 'graph2_p':
+        from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
+    elif args.nbt == 'graph2_p_stack':
+        from BeliefTrackerShareSA_cls_graph2_plus_stack import BeliefTracker
     elif args.nbt == 'graph3':
         from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
     elif args.nbt == 'graph4':
@@ -951,7 +963,10 @@ def main():
                 from apex import amp
             except ImportError:
                 raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-            model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+            if args.max_loss_scale is not None:
+                model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level, max_loss_scale=args.max_loss_scale)
+            else:
+                model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
         logger.info(optimizer)
 

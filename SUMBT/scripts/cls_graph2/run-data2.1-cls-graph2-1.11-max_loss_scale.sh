@@ -3,7 +3,7 @@
 #output_dir=exp-multiwoz/data2.1-cls-graph2/v1.1
 #output_dir=exp-multiwoz/data2.1-cls-graph2/v1.9  # cls_type 1 -> 0
 #output_dir=exp-multiwoz/data2.1-cls-graph2/v1.11  # graph_value_sup 0.5 -> 0.8
-output_dir=exp-multiwoz/data2.1-cls-graph2/v1.11-test  # test code
+output_dir=exp-multiwoz/data2.1-cls-graph2/v1.11-loss-scale  # test loss scale
 target_slot='all'
 nbt='graph2'
 bert_dir='/home/jiaofangkai/'
@@ -22,4 +22,4 @@ python code/main-multislot-share-5-newcls.py --do_train --do_eval --num_train_ep
 --dev_file data/multiwoz2.1_5/dev-5-full-value.tsv \
 --test_file data/multiwoz2.1_5/test-5-full-value.tsv \
 --ontology data/multiwoz2.1_5/ontology-full.json \
---cls_type 0 --extra_nbt --graph_value_sup 0.8
+--cls_type 0 --extra_nbt --graph_value_sup 0.8 --max_loss_scale 256
