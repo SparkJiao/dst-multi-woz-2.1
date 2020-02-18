@@ -681,11 +681,13 @@ def main():
 
     parser.add_argument('--override_attn_extra', default=False, action='store_true')
     parser.add_argument('--fusion_no_transform', default=False, action='store_true')
+    parser.add_argument('--fusion_act_fn', default='gelu', type=str)
 
     parser.add_argument('--context_agg', default=False, action='store_true')
     parser.add_argument('--context_agg_fusion', default=False, action='store_true')
     parser.add_argument('--fuse_type', default=0, type=int)
     parser.add_argument('--diag_attn_hidden_scale', default=2.0, type=float)
+    parser.add_argument('--diag_attn_act', default=None, type=str)
 
     parser.add_argument('--context_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--context_add_residual', default=False, action='store_true')
@@ -849,6 +851,8 @@ def main():
     elif args.nbt == 'flat_test1':
         logger.info("This is another test for flat slot attention but self attention mask.")
         from BeliefTrackerShareSA_flat_test1_cls import BeliefTracker
+    elif args.nbt == 'flat_test1_f':
+        from BeliefTrackerShareSA_flat_test1_cls_f import BeliefTracker
     elif args.nbt == 'extend_new':
         logger.info("This model uses a new extended attention module")
         from BeliefTrackerShareSA_double_attn1_cls import BeliefTracker
@@ -918,6 +922,10 @@ def main():
         from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
     elif args.nbt == 'graph2_p_stack':
         from BeliefTrackerShareSA_cls_graph2_plus_stack import BeliefTracker
+    elif args.nbt == 'graph_multi_view':
+        from BeliefTrackerShareSA_cls_graph_multi_view import BeliefTracker
+    elif args.nbt == 'graph_multi_view2':
+        from BeliefTrackerShareSA_cls_graph_multi_view2 import BeliefTracker
     elif args.nbt == 'graph3':
         from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
     elif args.nbt == 'graph4':

@@ -3,7 +3,7 @@ import math
 import copy
 
 import torch
-from pytorch_pretrained_bert.modeling import BertConfig, BertPreTrainedModel, gelu, BertSelfAttention, BertLayerNorm
+from pytorch_pretrained_bert.modeling import BertConfig, BertPreTrainedModel, gelu, BertSelfAttention, BertLayerNorm, ACT2FN
 from torch import distributions
 from torch import nn
 from torch.nn import Parameter
@@ -215,6 +215,38 @@ class DynamicFusion(nn.Module):
         fusion = self.act_fn(self.fuse_f(z))
         res = gate * fusion + (1 - gate) * x
         # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res
+
+
+class FusionGate(nn.Module):
+    def __init__(self, input_size, act_fn=gelu, gate_type=0, no_transform=False):
+        super(FusionGate, self).__init__()
+        self.no_transform = no_transform
+        if not self.no_transform:
+            self.transform1 = nn.Linear(input_size, input_size)
+        logger.info(f'{self.__class__.__name__} parameters:\n'
+                    f'Gate type: {gate_type}\n'
+                    f'No transform before fusion: {no_transform}\n'
+                    f'Activation function: {act_fn}')
+        if gate_type == 0:
+            self.gate_f = nn.Linear(input_size * 4, input_size)
+        elif gate_type == 1:
+            self.gate_f = nn.Linear(input_size * 4, 1)
+        else:
+            raise RuntimeError()
+        self.act_fn = act_fn
+
+    def forward(self, x, y):
+        """
+        :param x: initial sequence
+        :param y: attended sequence
+        :return: fused sequence
+        """
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        res = gate * x + (1 - gate) * y
         return res
 
 
@@ -681,6 +713,26 @@ class StackedGraphLayer(nn.Module):
             hidden = self.dialog_self_attention_layers[i](hidden, None)
 
         return hidden.view(slot_dim, ds, ts, -1), value_scores, graph_scores
+
+
+class MLP(nn.Module):
+    def __init__(self, input_dim, output_dim, act_fn=None):
+        super(MLP, self).__init__()
+        self.linear = nn.Linear(input_dim, output_dim)
+        self.output_dim = output_dim
+        if act_fn is not None:
+            self.act_fn = ACT2FN[act_fn]
+        else:
+            self.act_fn = None
+        logger.info(f'MLP activation function: {act_fn}')
+
+    def forward(self, x):
+        flat_x = x.reshape(-1, x.size(-1))
+        flat_x = self.linear(flat_x)
+        if self.act_fn is not None:
+            flat_x = self.act_fn(flat_x)
+        return flat_x.view(x.size()[:-1] + (self.output_dim,))
+
 
 # ===============================
 # Function

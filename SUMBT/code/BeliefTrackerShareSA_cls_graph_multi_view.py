@@ -4,9 +4,8 @@ from logging import Logger
 import torch
 import torch.nn as nn
 from allennlp.training.metrics import Average
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, gelu
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 from torch.nn import CrossEntropyLoss
-from torch.nn import functional as F
 
 try:
     from . import layers
@@ -19,7 +18,6 @@ except ImportError:
 
 logger: Logger = get_child_logger(__name__)
 
-ACT2FN = {'gelu': gelu, "relu": F.relu, "tanh": F.tanh}
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config, reduce_layers: int = 0, self_attention_type: int = 0):
@@ -87,17 +85,17 @@ class BeliefTracker(nn.Module):
         nbt_config.hidden_dropout_prob = self.hidden_dropout_prob
         logger.info(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         logger.info(f"Dialog Self Attention add residual: {args.sa_add_residual}")
+
         last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
-        if args.override_attn:
-            logger.info("Override self attention from last layer of BERT")
-            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                         add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual,
-                                                         self_attention=last_attention)
-        else:
-            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                         add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual)
+
+        nbt_ov_attn = last_attention if args.override_attn else None
+        logger.info(f"Override self attention from last layer of BERT: {args.override_attn}")
+
+        self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                     add_layer_norm=args.sa_add_layer_norm,
+                                                     add_residual=args.sa_add_residual,
+                                                     self_attention=nbt_ov_attn)
+
         if args.share_position_weight:
             logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
@@ -106,47 +104,34 @@ class BeliefTracker(nn.Module):
         self.extra_nbt = args.extra_nbt
         if self.extra_nbt:
             nbt_config.num_attention_heads = args.extra_nbt_attn_head
+
             self.override_attn_extra = args.override_attn_extra
             logger.info(f'If override self attention from last layer of BERT for extra belief tracker: {self.override_attn_extra}')
-            if self.override_attn_extra:
-                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                                add_layer_norm=args.sa_add_layer_norm,
-                                                                add_residual=args.sa_add_residual,
-                                                                self_attention=last_attention,
-                                                                no_position_embedding=args.sa_no_position_embedding)
-            else:
-                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                                add_layer_norm=args.sa_add_layer_norm,
-                                                                add_residual=args.sa_add_residual,
-                                                                no_position_embedding=args.sa_no_position_embedding)
+            extra_nbt_ov_attn = last_attention if self.override_attn_extra else None
+
+            self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                            add_layer_norm=args.sa_add_layer_norm,
+                                                            add_residual=args.sa_add_residual,
+                                                            self_attention=extra_nbt_ov_attn,
+                                                            no_position_embedding=args.sa_no_position_embedding)
+
             if not args.sa_no_position_embedding and args.share_position_weight:
                 self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         diag_attn_hidden_dim = int(args.diag_attn_hidden_scale * self.bert_output_dim)
         logger.info(f'Diagonal attention hidden size: {diag_attn_hidden_dim}')
-        self.diag_attn_act = args.diag_attn_act
         self.value_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
-        if self.diag_attn_act is not None:
-            self.value_act = layers.MLP(self.bert_output_dim, self.bert_output_dim, self.diag_attn_act)
+
+        self.dialog_summarize = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
 
         self.mask_self = args.mask_self
         logger.info(f'If mask self during graph attention: {self.mask_self}')
         self.inter_domain = args.inter_domain
         logger.info(f'If do inter-domain graph attention: {self.inter_domain}')
 
-        self.graph_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
-        if self.diag_attn_act is not None:
-            self.graph_act = layers.MLP(self.bert_output_dim, self.bert_output_dim, self.diag_attn_act)
+        self.graph_attention = layers.DiagonalAttention(self.bert_output_dim * 3, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
 
-        self.fuse_type = args.fuse_type
-        logger.info(f'Fuse type: {self.fuse_type}')
-        if self.fuse_type == 0:
-            self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
-                                                      act_fn=ACT2FN[args.fusion_act_fn])
-        elif self.fuse_type == 1:
-            self.graph_project = layers.SimpleTransform(self.bert_output_dim)
-        else:
-            raise RuntimeError()
+        self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform)
 
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
@@ -282,10 +267,10 @@ class BeliefTracker(nn.Module):
         slot_dim = len(target_slot)
 
         # Utterance encoding
-        _, _, all_attn_cache = self.utterance_encoder(input_ids.view(-1, self.max_seq_length),
-                                                      token_type_ids.view(-1, self.max_seq_length),
-                                                      attention_mask.view(-1, self.max_seq_length),
-                                                      output_all_encoded_layers=False)
+        dia_hidden, _, all_attn_cache = self.utterance_encoder(input_ids.view(-1, self.max_seq_length),
+                                                               token_type_ids.view(-1, self.max_seq_length),
+                                                               attention_mask.view(-1, self.max_seq_length),
+                                                               output_all_encoded_layers=False)
 
         # Domain-slot encoding
         slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
@@ -305,15 +290,23 @@ class BeliefTracker(nn.Module):
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
 
         # Neural belief tracking
-        hidden = self.transformer(hidden, None).view(slot_dim * bs, -1)
+        hidden = self.transformer(hidden, None).view(slot_dim, bs, -1)
+        # Dialog modeling
+        dia_h = dia_hidden[:, 0].view(ds, ts, -1)
+        dia_h = self.transformer(dia_h, None).view(bs, -1)
+        dia_h = dia_h.unsqueeze(0).expand(slot_dim, -1, -1).contiguous()  # (slot_dim, bs, h)
+        # Dialog summarize
+        tr_hidden = hidden.transpose(0, 1).contiguous()  # (bs, slot_dim, h)
+        sum_dia_h = self.dialog_summarize(tr_hidden, dia_hidden, x2_mask=attention_mask.view(-1, self.max_seq_length))  # (bs, slot_dim, h)
+        sum_dia_h = sum_dia_h.transpose(0, 1).reshape(slot_dim * ds, ts, -1)
+        sum_dia_h = self.transformer(sum_dia_h, None).view(slot_dim, bs, -1)
+
+        multi_view_hidden = torch.cat([hidden, dia_h, sum_dia_h], dim=-1).reshape(slot_dim, ds, ts, -1)
 
         # Value attention
         value_mask = self.value_mask
         value_tensor = self.defined_values
-        value_hidden, value_scores = self.value_attention(hidden.view(slot_dim, bs, -1),
-                                                          value_tensor, x3=value_tensor, x2_mask=value_mask, return_scores=True)
-        if self.diag_attn_act:
-            value_hidden = self.value_act(value_hidden)
+        value_hidden, value_scores = self.value_attention(hidden, value_tensor, x3=value_tensor, x2_mask=value_mask, return_scores=True)
 
         # Value supervision
         masked_value_scores = layers.masked_log_softmax_fp16(value_scores, value_mask, dim=-1)
@@ -322,17 +315,14 @@ class BeliefTracker(nn.Module):
         # Construct graph
         hidden = hidden.view(slot_dim, ds, ts, -1)
         graph_value = value_hidden.view(slot_dim, ds, ts, -1)[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
-        graph_query = hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
-        graph_key = hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        # graph_query = hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        # graph_key = hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        graph_query = multi_view_hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        graph_key = multi_view_hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
 
-        # graph_mask = graph_key.new_zeros(graph_key.size()[:-1])[:, None, None, :]
-        # if self.inter_domain:
-        #     graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
         graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=None,
                                                           drop_diagonal=self.mask_self, return_scores=True)
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
-        if self.diag_attn_act:
-            graph_hidden = self.graph_act(graph_hidden)
 
         # Fusion
         graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
