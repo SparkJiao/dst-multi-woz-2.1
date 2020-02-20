@@ -4,8 +4,9 @@ from logging import Logger
 import torch
 import torch.nn as nn
 from allennlp.training.metrics import Average
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel, gelu
 from torch.nn import CrossEntropyLoss
+from torch.nn import functional as F
 
 try:
     from . import layers
@@ -18,6 +19,7 @@ except ImportError:
 
 logger: Logger = get_child_logger(__name__)
 
+ACT2FN = {'gelu': gelu, "relu": F.relu, "tanh": F.tanh}
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config, reduce_layers: int = 0, self_attention_type: int = 0):
@@ -118,18 +120,24 @@ class BeliefTracker(nn.Module):
             if not args.sa_no_position_embedding and args.share_position_weight:
                 self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
+        self.diag_attn_act = args.diag_attn_act
         diag_attn_hidden_dim = int(args.diag_attn_hidden_scale * self.bert_output_dim)
         logger.info(f'Diagonal attention hidden size: {diag_attn_hidden_dim}')
         self.value_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
 
         self.dialog_summarize = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
+        if self.diag_attn_act:
+            self.dialog_sum_output = layers.MLP(self.bert_output_dim, self.bert_output_dim, act_fn=self.diag_attn_act)
 
         self.mask_self = args.mask_self
         logger.info(f'If mask self during graph attention: {self.mask_self}')
         self.inter_domain = args.inter_domain
         logger.info(f'If do inter-domain graph attention: {self.inter_domain}')
 
-        self.graph_attention = layers.DiagonalAttention(self.bert_output_dim * 3, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob)
+        multi_view_diag_attn_hidden_dim = int(args.multi_view_diag_attn_hidden_scale * self.bert_output_dim)
+        logger.info(f'Multi view attention hidden size: {multi_view_diag_attn_hidden_dim}')
+        self.graph_attention = layers.DiagonalAttention(self.bert_output_dim * 3, multi_view_diag_attn_hidden_dim,
+                                                        dropout=self.hidden_dropout_prob)
 
         self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform)
 
@@ -298,6 +306,8 @@ class BeliefTracker(nn.Module):
         # Dialog summarize
         tr_hidden = hidden.transpose(0, 1).contiguous()  # (bs, slot_dim, h)
         sum_dia_h = self.dialog_summarize(tr_hidden, dia_hidden, x2_mask=attention_mask.view(-1, self.max_seq_length))  # (bs, slot_dim, h)
+        if self.diag_attn_act:
+            sum_dia_h = self.dialog_sum_output(sum_dia_h)
         sum_dia_h = sum_dia_h.transpose(0, 1).reshape(slot_dim * ds, ts, -1)
         sum_dia_h = self.transformer(sum_dia_h, None).view(slot_dim, bs, -1)
 

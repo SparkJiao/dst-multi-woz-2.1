@@ -698,6 +698,8 @@ def main():
     parser.add_argument('--query_residual', default=False, action='store_true')
     parser.add_argument('--context_override_attn', default=False, action='store_true')
 
+    parser.add_argument('--multi_view_diag_attn_hidden_scale', default=1.0, type=float)
+
     parser.add_argument('--value_embedding_type', default='cls', type=str)
 
     args = parser.parse_args()
@@ -853,6 +855,8 @@ def main():
         from BeliefTrackerShareSA_flat_test1_cls import BeliefTracker
     elif args.nbt == 'flat_test1_f':
         from BeliefTrackerShareSA_flat_test1_cls_f import BeliefTracker
+    elif args.nbt == 'flat_test1_ff':
+        from BeliefTrackerShareSA_flat_test1_cls_ff import BeliefTracker
     elif args.nbt == 'extend_new':
         logger.info("This model uses a new extended attention module")
         from BeliefTrackerShareSA_double_attn1_cls import BeliefTracker

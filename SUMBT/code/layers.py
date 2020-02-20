@@ -228,10 +228,11 @@ class FusionGate(nn.Module):
                     f'Gate type: {gate_type}\n'
                     f'No transform before fusion: {no_transform}\n'
                     f'Activation function: {act_fn}')
+        self.fuse_f = nn.Linear(input_size * 4, input_size)
         if gate_type == 0:
-            self.gate_f = nn.Linear(input_size * 4, input_size)
+            self.gate_f = nn.Linear(input_size * 2, input_size)
         elif gate_type == 1:
-            self.gate_f = nn.Linear(input_size * 4, 1)
+            self.gate_f = nn.Linear(input_size * 2, 1)
         else:
             raise RuntimeError()
         self.act_fn = act_fn
@@ -245,8 +246,12 @@ class FusionGate(nn.Module):
         if not self.no_transform:
             y = self.act_fn(self.transform1(y))
         z = torch.cat([x, y, x - y, x * y], dim=-1)
-        gate = torch.sigmoid(self.gate_f(z))
-        res = gate * x + (1 - gate) * y
+
+        f = self.act_fn(self.fuse_f(z))
+
+        gate = torch.sigmoid(self.gate_f(torch.cat([x, f], dim=-1)))
+
+        res = gate * f + (1 - gate) * x
         return res
 
 
