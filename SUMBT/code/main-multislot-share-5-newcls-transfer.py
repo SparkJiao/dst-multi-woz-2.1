@@ -401,6 +401,36 @@ def get_label_embedding(labels, max_seq_length, tokenizer, device):
     return all_label_token_ids, all_label_len
 
 
+def get_transfer_label(all_answer_type_ids, all_label_ids, label_list):
+    all_transfer_labels = all_label_ids.new_zeros(all_label_ids.size()).fill_(-1)
+
+    data_num, max_turn, slot_dim = all_label_ids.size()
+    transfer_num = 0
+
+    for x in trange(data_num):
+        slot_vis = [0] * slot_dim
+        for t in range(max_turn):
+            if all_answer_type_ids[x][t][0] == -1:  # padding
+                break
+            if t == 0:
+                continue
+            for s1 in range(slot_dim):
+                if slot_vis[s1] == 1:  # if the slot has been masked, ignore it in following turns
+                    continue
+                if all_answer_type_ids[x][t][s1] != 2:  # if the slot is 'none' or 'do not care', ignore it
+                    continue
+                for s2 in range(slot_dim):
+                    if all_answer_type_ids[x][t - 1][s2] == 2 and \
+                            label_list[s1][all_label_ids[x][t][s1]] == label_list[s2][all_label_ids[x][t - 1][s2]]:
+                        all_transfer_labels[x][t][s1] = s2
+                        slot_vis[s1] = 1
+                        transfer_num += 1
+                        break
+
+    logger.info(f"Num of transferred values: {transfer_num}")
+    return all_transfer_labels
+
+
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
     """Truncates a sequence pair in place to the maximum length."""
 
@@ -703,7 +733,8 @@ def main():
 
     parser.add_argument('--value_embedding_type', default='cls', type=str)
     parser.add_argument('--sa_fuse_act_fn', default='gelu', type=str)
-    parser.add_argument('--transfer_sup', default=0, type=float)
+
+    parser.add_argument('--transfer_sup', default=0.0, type=float)
 
     args = parser.parse_args()
 
@@ -793,6 +824,7 @@ def main():
         all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
+        all_transfer_labels = get_transfer_label(all_answer_type_ids, all_label_ids, label_list)
 
         num_train_features = all_input_ids.size(0)
         num_train_steps = int(
@@ -806,7 +838,7 @@ def main():
         # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
 
         train_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
-                                   all_label_ids)
+                                   all_label_ids, all_transfer_labels)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -1059,16 +1091,16 @@ def main():
                 model.train()
 
                 batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-                input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
+                input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, transfer_labels = batch
 
                 # Forward
                 # with torch.autograd.set_detect_anomaly(True):
                 if n_gpu == 1:
                     loss, loss_slot, acc, _, acc_slot, _, _ = \
-                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu, transfer_labels=transfer_labels)
                 else:
                     loss, _, acc, _, acc_slot, _, _ = \
-                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu, transfer_labels=transfer_labels)
 
                     # average to multi-gpus
                     loss = loss.mean()

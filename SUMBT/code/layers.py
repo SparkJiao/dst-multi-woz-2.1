@@ -218,6 +218,69 @@ class DynamicFusion(nn.Module):
         return res
 
 
+class TripleFusionGate(nn.Module):
+    def __init__(self, input_size, act_fn=gelu, gate_type=0):
+        super(TripleFusionGate, self).__init__()
+        # self.no_transform = no_transform
+        # if not self.no_transform:
+        #     self.transform1 = nn.Linear(input_size, input_size)
+        #     self.transform2 = nn.Linear(input_size, input_size)
+        self.fuse_f1 = nn.Linear(input_size * 4, input_size)
+        self.fuse_f2 = nn.Linear(input_size * 4, input_size)
+        logger.info(f'{self.__class__.__name__} parameters:\n'
+                    f'Gate type: {gate_type}\n'
+                    # f'No transform before fusion: {no_transform}\n'
+                    f'Activation function: {act_fn}')
+        if gate_type == 0:
+            self.gate_f = nn.Linear(input_size * 2, input_size)
+        elif gate_type == 1:
+            self.gate_f = nn.Linear(input_size * 2, 1)
+        else:
+            raise RuntimeError()
+        self.act_fn = act_fn
+
+    def forward(self, x, y, z):
+        """
+        :param x: initial sequence
+        :param y: attended sequence1
+        :param z: attended sequence2
+        :return: fused sequence
+        """
+        # if not self.no_transform:
+        #     y = self.act_fn(self.transform1(y))
+        #     z = self.act_fn(self.transform2(z))
+        t1 = torch.cat([x, y, x - y, x * y], dim=-1)
+        t2 = torch.cat([x, z, x - z, x * z], dim=-1)
+        f1 = self.act_fn(self.fuse_f1(t1))
+        f2 = self.act_fn(self.fuse_f2(t2))
+        # gate = torch.sigmoid(self.gate_f(torch.cat([x, f1, f2], dim=-1)))
+        gate = torch.sigmoid(self.gate_f(torch.cat([x, f1], dim=-1)))
+        res = gate * x + (1 - gate) * f2
+        return res
+
+
+class FusionLayer(nn.Module):
+    def __init__(self, input_size, act_fn=gelu, dropout=0.1):
+        super(FusionLayer, self).__init__()
+
+        self.fuse_f = nn.Linear(input_size * 4, input_size)
+        logger.info(f'{self.__class__.__name__} parameters:\n'
+                    f'Activation function: {act_fn}')
+
+        self.dropout = nn.Dropout(dropout)
+        self.act_fn = act_fn
+
+    def forward(self, x, y):
+        """
+        :param x: initial sequence
+        :param y: attended sequence
+        :return: fused sequence
+        """
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        f = self.act_fn(self.dropout(self.fuse_f(z)))
+        return f
+
+
 class FusionGate(nn.Module):
     def __init__(self, input_size, act_fn=gelu, gate_type=0, no_transform=False):
         super(FusionGate, self).__init__()
@@ -579,7 +642,7 @@ class DiagonalAttentionScore(nn.Module):
     s_ij = Relu(Wx1)DRelu(Wx2)
     """
 
-    def __init__(self, input_size, hidden_size, dropout=0.1, do_similarity=False):
+    def __init__(self, input_size, hidden_size, dropout=0.1, do_similarity=False, act_fn=torch.relu):
         super(DiagonalAttentionScore, self).__init__()
         self.hidden_size = hidden_size
 
@@ -588,23 +651,26 @@ class DiagonalAttentionScore(nn.Module):
             self.diagonal = Parameter(torch.ones(1, 1, 1) / (hidden_size ** 0.5), requires_grad=False)
         else:
             self.diagonal = Parameter(torch.ones(1, 1, hidden_size), requires_grad=True)
+
+        logger.info(f'{self.__class__.__name__}.act_fn = {act_fn}')
+        self.act_fn = act_fn
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x1, x2):
         x1 = self.dropout(x1)
         x2 = self.dropout(x2)
 
-        x1_rep = torch.relu(self.linear(x1))
-        x2_rep = torch.relu(self.linear(x2))
+        x1_rep = self.act_fn(self.linear(x1))
+        x2_rep = self.act_fn(self.linear(x2))
         x1_rep = x1_rep * self.diagonal.expand_as(x1_rep)
 
         return x1_rep.bmm(x2_rep.transpose(1, 2))
 
 
 class DiagonalAttention(nn.Module):
-    def __init__(self, input_size, hidden_size, dropout=0.1, do_similarity=False):
+    def __init__(self, input_size, hidden_size, dropout=0.1, do_similarity=False, act_fn=torch.relu):
         super(DiagonalAttention, self).__init__()
-        self.scoring = DiagonalAttentionScore(input_size, hidden_size, dropout=dropout, do_similarity=do_similarity)
+        self.scoring = DiagonalAttentionScore(input_size, hidden_size, dropout=dropout, do_similarity=do_similarity, act_fn=act_fn)
 
     def forward(self, x1, x2, x2_mask=None, x3=None, drop_diagonal=False, return_scores=False):
         if x3 is None:

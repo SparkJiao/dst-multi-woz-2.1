@@ -150,6 +150,8 @@ class BeliefTracker(nn.Module):
         elif self.fuse_type == 2:
             self.graph_project = layers.FusionGate(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
                                                    act_fn=ACT2FN[args.fusion_act_fn])
+        elif self.fuse_type == 3:
+            self.graph_project = layers.TripleFusionGate(self.bert_output_dim, gate_type=1, act_fn=ACT2FN[args.fusion_act_fn])
         else:
             raise RuntimeError()
 
@@ -178,8 +180,6 @@ class BeliefTracker(nn.Module):
         self.graph_add_sup = args.graph_add_sup
         logger.info(f"Graph value scores supervision coherent: {args.graph_value_sup}")
         self.graph_value_sup = args.graph_value_sup
-        logger.info(f"Transfer labels supervision coherent: {args.transfer_sup}")
-        self.transfer_sup = args.transfer_sup
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
@@ -205,11 +205,6 @@ class BeliefTracker(nn.Module):
                 "train": Average(),
                 "eval": Average()
             }
-        if self.transfer_sup > 0:
-            self.metrics["transfer_loss"] = {
-                "train": Average()
-            }
-
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -282,7 +277,7 @@ class BeliefTracker(nn.Module):
         attention_mask = ids > 0
         return token_type_ids, attention_mask
 
-    def forward(self, input_ids, token_type_ids, attention_mask, answer_type_ids, labels, n_gpu=1, target_slot=None, transfer_labels=None):
+    def forward(self, input_ids, token_type_ids, attention_mask, answer_type_ids, labels, n_gpu=1, target_slot=None):
 
         # if target_slot is not specified, output values corresponding all slot-types
         if target_slot is None:
@@ -346,8 +341,14 @@ class BeliefTracker(nn.Module):
         if self.diag_attn_act:
             graph_hidden = self.graph_act(graph_hidden)
 
+        sum_hidden = graph_scores.bmm(graph_key).reshape(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
+
         # Fusion
-        graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
+        if self.fuse_type == 3:
+            graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden, sum_hidden)
+        else:
+            graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
+
         hidden = torch.cat([hidden[:, :, 0].unsqueeze(2), graph_hidden], dim=2)
 
         # Graph supervision
@@ -358,11 +359,6 @@ class BeliefTracker(nn.Module):
                                                                 target=((slot_target == 0) | (slot_target == 1))) / ds
 
             self.update_metric("slot_negative_loss", loss.item())
-        if self.transfer_sup > 0 and transfer_labels is not None:
-            transfer_labels = transfer_labels[:, 1:].view(ds * (ts - 1), slot_dim)
-            transfer_loss = self.transfer_sup * self.nll(graph_scores, transfer_labels) / ds
-            self.update_metric("transfer_loss", transfer_loss.item())
-            loss += transfer_loss
 
         # Extra neural belief tracking
         if self.extra_nbt:
@@ -484,6 +480,5 @@ class BeliefTracker(nn.Module):
         state = 'train' if self.training else 'eval'
         metrics = {}
         for k, v in self.metrics.items():
-            if state in v:
-                metrics[k] = v[state].get_metric(reset=reset)
+            metrics[k] = v[state].get_metric(reset=reset)
         return metrics

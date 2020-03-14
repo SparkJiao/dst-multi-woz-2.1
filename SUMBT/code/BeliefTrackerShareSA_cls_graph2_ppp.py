@@ -88,16 +88,14 @@ class BeliefTracker(nn.Module):
         logger.info(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         logger.info(f"Dialog Self Attention add residual: {args.sa_add_residual}")
         last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
-        if args.override_attn:
-            logger.info("Override self attention from last layer of BERT")
-            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                         add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual,
-                                                         self_attention=last_attention)
-        else:
-            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                         add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual)
+
+        tf_override_attn = last_attention if args.override_attn else None
+        self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                     add_layer_norm=args.sa_add_layer_norm,
+                                                     add_residual=args.sa_add_residual,
+                                                     self_attention=tf_override_attn)
+        self.tf_fuse_layer = layers.FusionLayer(self.bert_output_dim, act_fn=ACT2FN[args.sa_fuse_act_fn],
+                                                dropout=self.hidden_dropout_prob)
         if args.share_position_weight:
             logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
@@ -106,19 +104,17 @@ class BeliefTracker(nn.Module):
         self.extra_nbt = args.extra_nbt
         if self.extra_nbt:
             nbt_config.num_attention_heads = args.extra_nbt_attn_head
-            self.override_attn_extra = args.override_attn_extra
-            logger.info(f'If override self attention from last layer of BERT for extra belief tracker: {self.override_attn_extra}')
-            if self.override_attn_extra:
-                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                                add_layer_norm=args.sa_add_layer_norm,
-                                                                add_residual=args.sa_add_residual,
-                                                                self_attention=last_attention,
-                                                                no_position_embedding=args.sa_no_position_embedding)
-            else:
-                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                                add_layer_norm=args.sa_add_layer_norm,
-                                                                add_residual=args.sa_add_residual,
-                                                                no_position_embedding=args.sa_no_position_embedding)
+            self.override_attn_extra = last_attention if args.override_attn_extra else None
+            logger.info(f'If override self attention from last layer of BERT for extra belief tracker: {args.override_attn_extra}')
+
+            self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                            add_layer_norm=args.sa_add_layer_norm,
+                                                            add_residual=args.sa_add_residual,
+                                                            self_attention=self.override_attn_extra,
+                                                            no_position_embedding=args.sa_no_position_embedding)
+            self.bt_fuse_layer = layers.FusionLayer(self.bert_output_dim, act_fn=ACT2FN[args.sa_fuse_act_fn],
+                                                    dropout=self.hidden_dropout_prob)
+
             if not args.sa_no_position_embedding and args.share_position_weight:
                 self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
@@ -178,8 +174,6 @@ class BeliefTracker(nn.Module):
         self.graph_add_sup = args.graph_add_sup
         logger.info(f"Graph value scores supervision coherent: {args.graph_value_sup}")
         self.graph_value_sup = args.graph_value_sup
-        logger.info(f"Transfer labels supervision coherent: {args.transfer_sup}")
-        self.transfer_sup = args.transfer_sup
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
@@ -205,11 +199,6 @@ class BeliefTracker(nn.Module):
                 "train": Average(),
                 "eval": Average()
             }
-        if self.transfer_sup > 0:
-            self.metrics["transfer_loss"] = {
-                "train": Average()
-            }
-
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -282,7 +271,7 @@ class BeliefTracker(nn.Module):
         attention_mask = ids > 0
         return token_type_ids, attention_mask
 
-    def forward(self, input_ids, token_type_ids, attention_mask, answer_type_ids, labels, n_gpu=1, target_slot=None, transfer_labels=None):
+    def forward(self, input_ids, token_type_ids, attention_mask, answer_type_ids, labels, n_gpu=1, target_slot=None):
 
         # if target_slot is not specified, output values corresponding all slot-types
         if target_slot is None:
@@ -317,7 +306,8 @@ class BeliefTracker(nn.Module):
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
 
         # Neural belief tracking
-        hidden = self.transformer(hidden, None).view(slot_dim * bs, -1)
+        sa_hidden = self.transformer(hidden, None)
+        hidden = self.tf_fuse_layer(hidden, sa_hidden).view(slot_dim * bs, -1)
 
         # Value attention
         value_mask = self.value_mask
@@ -358,16 +348,12 @@ class BeliefTracker(nn.Module):
                                                                 target=((slot_target == 0) | (slot_target == 1))) / ds
 
             self.update_metric("slot_negative_loss", loss.item())
-        if self.transfer_sup > 0 and transfer_labels is not None:
-            transfer_labels = transfer_labels[:, 1:].view(ds * (ts - 1), slot_dim)
-            transfer_loss = self.transfer_sup * self.nll(graph_scores, transfer_labels) / ds
-            self.update_metric("transfer_loss", transfer_loss.item())
-            loss += transfer_loss
 
         # Extra neural belief tracking
         if self.extra_nbt:
             hidden = hidden.reshape(slot_dim * ds, ts, -1)
-            hidden = self.belief_tracker(hidden, None).view(slot_dim, ds, ts, -1)
+            bt_hidden = self.belief_tracker(hidden, None)
+            hidden = self.bt_fuse_layer(hidden, bt_hidden).view(slot_dim, ds, ts, -1)
 
         answer_type_logits = self.classifier(hidden)
         _, answer_type_pred = answer_type_logits.max(dim=-1)
@@ -484,6 +470,5 @@ class BeliefTracker(nn.Module):
         state = 'train' if self.training else 'eval'
         metrics = {}
         for k, v in self.metrics.items():
-            if state in v:
-                metrics[k] = v[state].get_metric(reset=reset)
+            metrics[k] = v[state].get_metric(reset=reset)
         return metrics

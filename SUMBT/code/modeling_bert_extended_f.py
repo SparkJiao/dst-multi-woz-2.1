@@ -722,7 +722,8 @@ class SimpleDialogSelfAttention(BertPreTrainedModel):
 
             self.sa_output = nn.Sequential(*output_module_list)
             if self.add_layer_norm:
-                self.saLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+                # self.saLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)  # fp16_opt_level == O1 will cause a error
+                self.saLayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
 
         self.apply(self.init_bert_weights)
 
@@ -771,7 +772,8 @@ class SimpleSelfAttention(BertPreTrainedModel):
             #     output_module_list.append(nn.LayerNorm(config.hidden_size, eps=1e-12))
             self.sa_output = nn.Sequential(*output_module_list)
             if self.add_layer_norm:
-                self.saLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+                # self.saLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)  # fp16_opt_level == O1 will cause a error
+                self.saLayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
         # else:
         #     self.sa_output = None
 
