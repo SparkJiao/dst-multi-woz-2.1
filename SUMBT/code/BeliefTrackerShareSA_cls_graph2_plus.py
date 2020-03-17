@@ -210,6 +210,10 @@ class BeliefTracker(nn.Module):
                 "train": Average()
             }
 
+        self.save_gate = args.save_gate
+        if args.save_gate:
+            self.gate_metric = []
+
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -347,7 +351,13 @@ class BeliefTracker(nn.Module):
             graph_hidden = self.graph_act(graph_hidden)
 
         # Fusion
-        graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
+        if self.fuse_type == 0:
+            graph_hidden, gate = self.graph_project(hidden[:, :, 1:], graph_hidden)
+            if self.save_gate and not self.training:
+                self.gate_metric.append(gate.detach().cpu().float())
+        else:
+            graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
+
         hidden = torch.cat([hidden[:, :, 0].unsqueeze(2), graph_hidden], dim=2)
 
         # Graph supervision
@@ -487,3 +497,9 @@ class BeliefTracker(nn.Module):
             if state in v:
                 metrics[k] = v[state].get_metric(reset=reset)
         return metrics
+
+    def get_gate_metric(self, reset=False):
+        metric = torch.cat(self.gate_metric, dim=1).squeeze(-1)
+        if reset:
+            self.gate_metric.clear()
+        return metric

@@ -704,6 +704,7 @@ def main():
     parser.add_argument('--value_embedding_type', default='cls', type=str)
     parser.add_argument('--sa_fuse_act_fn', default='gelu', type=str)
     parser.add_argument('--transfer_sup', default=0, type=float)
+    parser.add_argument('--save_gate', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -1348,7 +1349,8 @@ def main():
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
 
                 accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
-                predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor))
+                predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor,
+                                                   gate=model.get_gate_metric(reset=True) if args.save_gate else None))
 
                 nb_eval_ex = (answer_type_ids[:, :, 0].view(-1) != -1).sum().item()
                 nb_eval_examples += nb_eval_ex
@@ -1537,7 +1539,15 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
     return accuracies
 
 
-def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor):
+def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor, gate=None):
+    """
+    :param pred_slots:
+    :param answer_type_ids:
+    :param labels:
+    :param processor:
+    :param gate: [slot_dim, ds, ts - 1, 1]
+    :return:
+    """
     answer_type_pred = pred_slots[:, :, :, 0]
     pred_slots = pred_slots[:, :, :, 1]
     type_vocab = ['none', 'do not care', 'value']
@@ -1545,6 +1555,8 @@ def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor):
     ds = pred_slots.size(0)
     ts = pred_slots.size(1)
     slot_dim = pred_slots.size(-1)
+    if gate is not None:
+        assert gate.size() == (slot_dim, ds, ts - 1)
     for i in range(ds):
         dialog_pred = []
         for j in range(ts):
@@ -1572,6 +1584,12 @@ def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor):
                     "predict_answer_type": pred_answer_type,
                     "gold_answer_type": gold_answer_type
                 }
+
+                if gate is not None:
+                    if j == 0:
+                        slot_pred[slot]['gate'] = 0
+                    else:
+                        slot_pred[slot]['gate'] = gate[slot_idx, i, j - 1].item()
             dialog_pred.append(slot_pred)
         predictions.append(dialog_pred)
     return predictions

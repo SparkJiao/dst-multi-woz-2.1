@@ -215,7 +215,7 @@ class DynamicFusion(nn.Module):
         fusion = self.act_fn(self.fuse_f(z))
         res = gate * fusion + (1 - gate) * x
         # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
-        return res
+        return res, gate
 
 
 class TripleFusionGate(nn.Module):
