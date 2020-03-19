@@ -705,6 +705,7 @@ def main():
     parser.add_argument('--sa_fuse_act_fn', default='gelu', type=str)
     parser.add_argument('--transfer_sup', default=0, type=float)
     parser.add_argument('--save_gate', default=False, action='store_true')
+    parser.add_argument('--slot_res', default=None, type=str)
 
     args = parser.parse_args()
 

@@ -21,6 +21,7 @@ logger: Logger = get_child_logger(__name__)
 
 ACT2FN = {'gelu': gelu, "relu": F.relu, "tanh": F.tanh}
 
+
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config, reduce_layers: int = 0, self_attention_type: int = 0):
         super(BertForUtteranceEncoding, self).__init__(config)
@@ -335,7 +336,7 @@ class BeliefTracker(nn.Module):
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
 
         # Fusion
-        graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
+        graph_hidden, gate = self.graph_project(hidden[:, :, 1:], graph_hidden)
         hidden = torch.cat([hidden[:, :, 0].unsqueeze(2), graph_hidden], dim=2)
 
         # Graph supervision

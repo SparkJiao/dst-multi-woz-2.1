@@ -153,6 +153,12 @@ class BeliefTracker(nn.Module):
         else:
             raise RuntimeError()
 
+        if args.slot_res is not None:
+            self.slot_res = [int(x) for x in args.slot_res.split(":")]
+            logger.info(f'Slot restriction: {self.slot_res}')
+        else:
+            self.slot_res = None
+
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
         elif args.cls_type == 1:
@@ -357,6 +363,10 @@ class BeliefTracker(nn.Module):
                 self.gate_metric.append(gate.detach().cpu().float())
         else:
             graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
+
+        if self.slot_res is not None:
+            ini_hidden = graph_query.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
+            graph_hidden[self.slot_res, :, :, :] = ini_hidden[self.slot_res, :, :, :]
 
         hidden = torch.cat([hidden[:, :, 0].unsqueeze(2), graph_hidden], dim=2)
 
