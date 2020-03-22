@@ -1,21 +1,22 @@
-import argparse
-import collections
 import csv
-import json
-import logging
 import os
+import logging
+import argparse
 import random
+import collections
+from tqdm import tqdm, trange
 import time
 
 import numpy as np
 import torch
-from pytorch_pretrained_bert.optimization import BertAdam
-from pytorch_pretrained_bert.tokenization import BertTokenizer
-from tensorboardX import SummaryWriter
 from torch.nn import Parameter
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
-from tqdm import tqdm, trange
+
+from pytorch_pretrained_bert.tokenization import BertTokenizer
+from pytorch_pretrained_bert.optimization import BertAdam
+
+from tensorboardX import SummaryWriter
 
 try:
     from .global_logger import register_logger, register_summary_writer
@@ -52,10 +53,9 @@ class InputExample(object):
 class InputFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, input_len, answer_type, label_id):
+    def __init__(self, input_ids, input_len, label_id):
         self.input_ids = input_ids
         self.input_len = input_len
-        self.answer_type = answer_type
         self.label_id = label_id
 
 
@@ -116,10 +116,9 @@ class Processor(DataProcessor):
 
             ontology = json.load(fp_ontology)
             for slot in ontology.keys():
-                # ontology[slot].append("none")
-                """ Pop all 'none' and 'do not care' values """
-                ontology[slot] = [x for x in ontology[slot] if x not in ["none", "do not care"]]
-
+                ontology[slot].append("none")
+                if "do not care" not in ontology[slot]:
+                    ontology[slot].append("do not care")
                 """ FIX_UNDEFINED: Add undefined value. """
                 ontology[slot].append("undefined")
             fp_ontology.close()
@@ -157,11 +156,8 @@ class Processor(DataProcessor):
             if slot == "pricerange":
                 self.target_slot[i] = "price range"
 
-        self.reverse = config.reverse
-
         logger.info('Processor: target_slot')
         logger.info(self.target_slot)
-        logger.info(f'Will reverse input: {self.reverse}')
 
     def get_train_examples(self, data_dir, accumulation=False, train_file=None):
         """See base class."""
@@ -210,9 +206,6 @@ class Processor(DataProcessor):
                 text_a = line[2]  # line[2]: user utterance
                 text_b = line[3]  # line[3]: system response
 
-                if self.reverse:
-                    text_a, text_b = text_b, text_a
-
             label = [line[4 + idx] for idx in self.target_slot_idx]
 
             examples.append(
@@ -224,8 +217,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     """Loads a data file into a list of `InputBatch`s."""
 
     label_map = [{label: i for i, label in enumerate(labels)} for labels in label_list]
-    for labels in label_map:
-        assert 'none' not in labels and 'do not care' not in labels
     slot_dim = len(label_list)
 
     features = []
@@ -239,11 +230,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             max_turn = int(example.guid.split('-')[2])
     max_turn_length = min(max_turn + 1, max_turn_length)
     logger.info("max_turn_length = %d" % max_turn)
-
-    undefined = 0
-    none_values = 0
-    care_values = 0
-    ptr_values = 0
 
     for (ex_index, example) in tqdm(enumerate(examples)):
         tokens_a = [x if x != '#' else '[SEP]' for x in tokenizer.tokenize(example.text_a)]
@@ -293,33 +279,12 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         assert len(input_ids) == max_seq_length
 
         label_id = []
-        answer_type = []
         label_info = 'label: '
-        answer_type_info = 'answer type: '
         for i, label in enumerate(example.label):
             if label == 'dontcare':
-                # label = 'do not care'
-                raise RuntimeError()
-            if label == 'undefined':
-                undefined += 1
-            if label == 'none':
-                answer_type.append(0)
-                label_id.append(-1)
-                answer_type_info += '%s (id = %d) ' % ('none', 0)
-                label_info += 'None '
-                none_values += 1
-            elif label == 'do not care':
-                answer_type.append(1)
-                label_id.append(-1)
-                answer_type_info += '%s (id = %d) ' % ('do not care', 1)
-                label_info += 'None '
-                care_values += 1
-            else:
-                answer_type.append(2)
-                label_id.append(label_map[i][label])
-                answer_type_info += 'pick (id = 2) '
-                label_info += '%s (id = %d) ' % (label, label_map[i][label])
-                ptr_values += 1
+                label = 'do not care'
+            label_id.append(label_map[i][label])
+            label_info += '%s (id = %d) ' % (label, label_map[i][label])
 
         if ex_index < 5:
             logger.info("*** Example ***")
@@ -329,7 +294,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
             logger.info("input_len: %s" % " ".join([str(x) for x in input_len]))
             logger.info("label: " + label_info)
-            logger.info("answer type: " + answer_type_info)
 
         curr_dialogue_idx = example.guid.split('-')[1]
         curr_turn_idx = int(example.guid.split('-')[2])
@@ -338,7 +302,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             if prev_turn_idx < max_turn_length:
                 features += [InputFeatures(input_ids=all_padding,
                                            input_len=all_padding_len,
-                                           answer_type=[-1] * slot_dim,
                                            label_id=[-1] * slot_dim)] * (max_turn_length - prev_turn_idx - 1)
             assert len(features) % max_turn_length == 0
 
@@ -346,8 +309,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             features.append(
                 InputFeatures(input_ids=input_ids,
                               input_len=input_len,
-                              label_id=label_id,
-                              answer_type=answer_type))
+                              label_id=label_id))
 
         prev_dialogue_idx = curr_dialogue_idx
         prev_turn_idx = curr_turn_idx
@@ -355,28 +317,19 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     if prev_turn_idx < max_turn_length:
         features += [InputFeatures(input_ids=all_padding,
                                    input_len=all_padding_len,
-                                   answer_type=[-1] * slot_dim,
-                                   label_id=[-1] * slot_dim), ] * (max_turn_length - prev_turn_idx - 1)
+                                   label_id=[-1] * slot_dim)]  * (max_turn_length - prev_turn_idx - 1)
     assert len(features) % max_turn_length == 0
 
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_len = torch.tensor([f.input_len for f in features], dtype=torch.long)
-    all_answer_type_ids = torch.tensor([f.answer_type for f in features], dtype=torch.long)
     all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.long)
 
     # reshape tensors to [#batch, #max_turn_length, #max_seq_length]
     all_input_ids = all_input_ids.view(-1, max_turn_length, max_seq_length)
     all_input_len = all_input_len.view(-1, max_turn_length, 2)
-    all_answer_type_ids = all_answer_type_ids.view(-1, max_turn_length, slot_dim)
     all_label_ids = all_label_ids.view(-1, max_turn_length, slot_dim)
 
-    logger.info(f"There are {undefined} undefined values in total.")
-    logger.info(f"Answer types:")
-    logger.info(f"None: {none_values}")
-    logger.info(f"Do not care: {care_values}")
-    logger.info(f"PICK: {ptr_values}")
-
-    return all_input_ids, all_input_len, all_answer_type_ids, all_label_ids
+    return all_input_ids, all_input_len, all_label_ids
 
 
 def get_label_embedding(labels, max_seq_length, tokenizer, device):
@@ -437,20 +390,6 @@ def get_pretrain(model, state_dict):
             print("Skip", name)
             continue
     return own_state
-
-
-def make_aux_tensors(ids, len):
-    token_type_ids = torch.zeros(ids.size(), dtype=torch.long)
-    for i in range(len.size(0)):
-        for j in range(len.size(1)):
-            if len[i, j, 0] == 0:  # padding
-                break
-            elif len[i, j, 1] > 0:  # escape only text_a case
-                start = len[i, j, 0]
-                ending = len[i, j, 0] + len[i, j, 1]
-                token_type_ids[i, j, start:ending] = 1
-    attention_mask = ids > 0
-    return token_type_ids, attention_mask
 
 
 def main():
@@ -520,7 +459,7 @@ def main():
                              "than this will be padded.")
     parser.add_argument("--max_slot_length", type=int, default=8)
     parser.add_argument("--max_label_length",
-                        default=18,
+                        default=32,
                         type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. \n"
                              "Sequences longer than this will be truncated, and sequences shorter \n"
@@ -544,7 +483,7 @@ def main():
                         help="set initial hidden of rnns zero")
     parser.add_argument('--attn_head',
                         type=int,
-                        default=6,
+                        default=4,
                         help="the number of heads in multi-headed attention")
     parser.add_argument("--do_train",
                         action='store_true',
@@ -579,7 +518,6 @@ def main():
                         default=3.0,
                         type=float,
                         help="Total number of training epochs to perform.")
-    parser.add_argument('--per_eval_steps', type=int, default=2000, help='Per steps for evaluation')
     parser.add_argument("--patience",
                         default=10.0,
                         type=float,
@@ -621,91 +559,7 @@ def main():
     parser.add_argument('--model_id', type=int, default=1)
     parser.add_argument('--use_query', default=False, action='store_true')
     parser.add_argument('--fix_bert', default=False, action='store_true')
-    parser.add_argument('--reduce_layers', default=0, type=int)
-    parser.add_argument('--sa_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--sa_add_residual', default=False, action='store_true')
-    parser.add_argument('--ss_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--across_slot', default=False, action='store_true')
-    parser.add_argument('--override_attn', default=False, action='store_true')
-    parser.add_argument('--share_position_weight', default=False, action='store_true')
-    parser.add_argument('--slot_attention_type', default=-1, type=int)
-    parser.add_argument('--share_type', type=str, default='full_share', help="full_share, share_weight, copy_weight")
-    parser.add_argument('--key_type', type=int, default=0)
-    parser.add_argument('--self_attention_type', type=int, default=0)
-    parser.add_argument('--cls_type', default=0, type=int)
-    parser.add_argument('--mask_self', default=False, action='store_true')
-    parser.add_argument('--remove_some_slot', default=False, action='store_true')
-    parser.add_argument('--extra_dropout', type=float, default=-1.)
-    parser.add_argument('--reverse', default=False, action='store_true')
-    parser.add_argument('--weighted_cls', default=False, action='store_true')
-    parser.add_argument('--use_flow', default=False, action='store_true')
-    parser.add_argument('--flow_layer', default=100, type=int)
-    parser.add_argument('--flow_head', default=None, type=int)
-    parser.add_argument('--hie_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--hie_residual', default=False, action='store_true')
-    parser.add_argument('--hie_add_sup', default=0., type=float)
     parser.add_argument('--max_grad_norm', default=1.0, type=float)
-    parser.add_argument('--hie_wd_residual', default=False, action='store_true')
-    parser.add_argument('--hie_wd_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--hie_wd_add_output', default=False, action='store_true')
-    parser.add_argument('--gate_type', default=0, type=int)
-    parser.add_argument('--cls_loss_weight', default=1., type=float)
-    parser.add_argument('--hidden_output', default=False, action='store_true')
-    parser.add_argument('--dropout', default=None, type=float)
-    parser.add_argument('--sa_no_position_embedding', default=False, action='store_true')
-
-    parser.add_argument('--use_context', default=False, action='store_true')
-    parser.add_argument('--pre_turn', default=2, type=int)
-
-    parser.add_argument('--use_pooling', default=False, action='store_true')
-    parser.add_argument('--pooling_head_num', default=1, type=int)
-    parser.add_argument('--use_mt', default=False, action='store_true')
-    parser.add_argument('--inter_domain', default=False, action='store_true')
-
-    parser.add_argument('--extra_nbt', default=False, action='store_true')
-    parser.add_argument('--extra_nbt_attn_head', default=6, type=int)
-    parser.add_argument('--graph_add_sup', default=0., type=float)
-    parser.add_argument('--graph_value_sup', default=0., type=float)
-    parser.add_argument('--graph_attn_head', default=1, type=int)
-    parser.add_argument('--graph_add_output', default=False, action='store_true')
-    parser.add_argument('--graph_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--graph_add_residual', default=False, action='store_true')
-    parser.add_argument('--graph_hard_attn', default=False, action='store_true')
-    parser.add_argument('--use_rl', default=False, action='store_true')
-    parser.add_argument('--value_attn_head', default=1, type=int)
-    parser.add_argument('--value_attn_output', default=False, action='store_true')
-    parser.add_argument('--value_attn_layer_norm', default=False, action='store_true')
-    parser.add_argument('--value_attn_residual', default=False, action='store_true')
-
-    parser.add_argument('--detach', default=False, action='store_true')
-
-    parser.add_argument('--override_attn_extra', default=False, action='store_true')
-    parser.add_argument('--fusion_no_transform', default=False, action='store_true')
-    parser.add_argument('--fusion_act_fn', default='gelu', type=str)
-
-    parser.add_argument('--context_agg', default=False, action='store_true')
-    parser.add_argument('--context_agg_fusion', default=False, action='store_true')
-    parser.add_argument('--fuse_type', default=0, type=int)
-    parser.add_argument('--diag_attn_hidden_scale', default=2.0, type=float)
-    parser.add_argument('--diag_attn_act', default=None, type=str)
-    parser.add_argument('--diag_attn_act_fn', default='relu', type=str)
-
-    parser.add_argument('--context_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--context_add_residual', default=False, action='store_true')
-    parser.add_argument('--ff_hidden_size', type=int, default=1536)
-    parser.add_argument('--ff_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--ff_add_residual', default=False, action='store_true')
-    parser.add_argument('--query_layer_norm', default=False, action='store_true')
-    parser.add_argument('--query_residual', default=False, action='store_true')
-    parser.add_argument('--context_override_attn', default=False, action='store_true')
-
-    parser.add_argument('--multi_view_diag_attn_hidden_scale', default=1.0, type=float)
-
-    parser.add_argument('--value_embedding_type', default='cls', type=str)
-    parser.add_argument('--sa_fuse_act_fn', default='gelu', type=str)
-    parser.add_argument('--transfer_sup', default=0, type=float)
-    parser.add_argument('--save_gate', default=False, action='store_true')
-    parser.add_argument('--slot_res', default=None, type=str)
 
     args = parser.parse_args()
 
@@ -723,8 +577,6 @@ def main():
         summary_writer = SummaryWriter("./%s/%s" % (args.tf_dir, tb_file_name))
     else:
         summary_writer = None
-
-    register_summary_writer(summary_writer)
 
     # Logger
     tb_file_name = tb_file_name.replace('/', '-')
@@ -792,13 +644,11 @@ def main():
         dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation, dev_file=args.dev_file)
 
         ## Training utterances
-        all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
+        all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-        all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
 
         num_train_features = all_input_ids.size(0)
-        num_train_steps = int(
-            num_train_features / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+        num_train_steps = int(num_train_features / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
@@ -807,8 +657,7 @@ def main():
 
         # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
 
-        train_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
-                                   all_label_ids)
+        train_data = TensorDataset(all_input_ids, all_input_len, all_label_ids)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -818,9 +667,8 @@ def main():
                                       pin_memory=True, num_workers=4)
 
         ## Dev utterances
-        all_input_ids_dev, all_input_len_dev, all_answer_type_ids_dev, all_label_ids_dev = convert_examples_to_features(
+        all_input_ids_dev, all_input_len_dev, all_label_ids_dev = convert_examples_to_features(
             dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-        all_token_type_ids_dev, all_input_mask_dev = make_aux_tensors(all_input_ids_dev, all_input_len_dev)
         num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
 
         logger.info("***** Running validation *****")
@@ -831,8 +679,7 @@ def main():
         # all_input_ids_dev, all_input_len_dev, all_label_ids_dev = \
         #     all_input_ids_dev.to(device), all_input_len_dev.to(device), all_label_ids_dev.to(device)
 
-        dev_data = TensorDataset(all_input_ids_dev,
-                                 all_token_type_ids_dev, all_input_mask_dev, all_answer_type_ids_dev, all_label_ids_dev)
+        dev_data = TensorDataset(all_input_ids_dev, all_input_len_dev, all_label_ids_dev)
         dev_sampler = SequentialSampler(dev_data)
         dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
 
@@ -844,125 +691,9 @@ def main():
 
     # Prepare model
     if args.nbt == 'rnn':
-        logger.info("Use rnn as neural belief tracker")
-        from BeliefTrackerShare import BeliefTracker
+        from BeliefTrackerSlotQueryMultiSlot_F import BeliefTracker
     elif args.nbt == 'transformer':
-        logger.info("Use transformer as neural belief tracker")
-        from BeliefTrackerShareTransformer import BeliefTracker
-    elif args.nbt == 'sa':
-        logger.info("Use simple self-attention as neural belief tracker")
-        from BeliefTrackerShareSA import BeliefTracker
-    elif args.nbt == 'bert':
-        logger.info("Initialize transformer dialog encoder from pre-trained BERT")
-        from BeliefTrackerShareBert import BeliefTracker
-    elif args.nbt == 'flat_test1':
-        logger.info("This is another test for flat slot attention but self attention mask.")
-        from BeliefTrackerShareSA_flat_test1_cls import BeliefTracker
-    elif args.nbt == 'flat_test1_f':
-        from BeliefTrackerShareSA_flat_test1_cls_f import BeliefTracker
-    elif args.nbt == 'flat_test1_ff':
-        from BeliefTrackerShareSA_flat_test1_cls_ff import BeliefTracker
-    elif args.nbt == 'extend_new':
-        logger.info("This model uses a new extended attention module")
-        from BeliefTrackerShareSA_double_attn1_cls import BeliefTracker
-    elif args.nbt == 'sa_cache_type':
-        from BeliefTrackerShareSA_cache_type import BeliefTracker
-    elif args.nbt == 'ini_sa_cache_flat':
-        from BeliefTrackerShareSA_init_cache_flat import BeliefTracker
-    elif args.nbt == 'sa_cache_type_prop':
-        from BeliefTrackerShareSA_cache_type_prop_cls import BeliefTracker
-    elif args.nbt == 'sa_cache_type_prop_2':
-        from BeliefTrackerShareSA_cache_type_prop_cls2 import BeliefTracker
-    elif args.nbt == 'sa_cache_type_prop_fold':
-        from BeliefTrackerShareSA_cache_type_prop_fold_cls import BeliefTracker
-    elif args.nbt == 'cache_combine':
-        from BeliefTrackerShareSA_cls_cb import BeliefTracker
-    elif args.nbt == 'stack':
-        from BeliefTrackerShareSA_stack import BeliefTracker
-    elif args.nbt == 'stack_remove':
-        from BeliefTrackerShareSA_stack_remove import BeliefTracker
-    elif args.nbt == 'stack_ex':
-        from BeliefTrackerShareSA_stack_ex import BeliefTracker
-    elif args.nbt == 'dstc':
-        from BeliefTracker_dstc import BeliefTracker
-    elif args.nbt == 'fuse':
-        from BeliefTrackerShareSA_fusion import BeliefTracker
-    elif args.nbt == 'flow':
-        from BeliefTrackerShareSA_flat_flow import BeliefTracker
-    elif args.nbt == 'flow2':
-        from BeliefTrackerShareSA_flat_flow2 import BeliefTracker
-    elif args.nbt == 'flow3':
-        from BeliefTrackerShareSA_flat_flow3 import BeliefTracker
-    elif args.nbt == 'hie_fuse':
-        from BeliefTrackerShareSA_flat_hie_cls import BeliefTracker
-    elif args.nbt == 'hie_tr':
-        from BeliefTrackerShareSA_flat_hie_cls_tr import BeliefTracker
-    elif args.nbt == 'hie_simple':
-        from BeliefTrackerShareSA_flat_hie_cls_simple import BeliefTracker
-    elif args.nbt == 'hie_mt':
-        from BeliefTrackerShareSA_flat_hie_cls_mt import BeliefTracker
-    elif args.nbt == 'hie_domain':
-        from BeliefTrackerShareSA_flat_hie_cls_domain import BeliefTracker
-    elif args.nbt == 'flow_hie':
-        from BeliefTrackerShareSA_flat_flow_hie import BeliefTracker
-    elif args.nbt == 'flat_xl':
-        from BeliefTrackerShareSA_flat_xl import BeliefTracker
-    elif args.nbt == 'flat_xl2':
-        from BeliefTrackerShareSA_flat_xl2 import BeliefTracker
-    elif args.nbt == 'flat_xl3':
-        from BeliefTrackerShareSA_flat_xl3 import BeliefTracker
-    elif args.nbt == 'flat_xl4':
-        from BeliefTrackerShareSA_flat_xl4 import BeliefTracker
-    elif args.nbt == 'flat_xl5':
-        from BeliefTrackerShareSA_flat_xl5 import BeliefTracker
-    elif args.nbt == 'flat_xl6':
-        from BeliefTrackerShareSA_flat_xl6 import BeliefTracker
-    elif args.nbt == 'hie_pp':
-        from BeliefTrackerShareSA_pp_hie_cls import BeliefTracker
-    elif args.nbt == 'graph':
-        from BeliefTrackerShareSA_cls_graph import BeliefTracker
-    elif args.nbt == 'graph2':
-        from BeliefTrackerShareSA_cls_graph2 import BeliefTracker
-    elif args.nbt == 'graph2f':
-        from BeliefTrackerShareSA_cls_graph2_f import BeliefTracker
-    elif args.nbt == 'graph2_no':
-        from BeliefTrackerShareSA_cls_graph2_no import BeliefTracker
-    elif args.nbt == 'graph2_gate':
-        from BeliefTrackerShareSA_cls_graph2_gate import BeliefTracker
-    elif args.nbt == 'graph2_p':
-        from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
-    elif args.nbt == 'graph2_pp':
-        from BeliefTrackerShareSA_cls_graph2_pp import BeliefTracker
-    elif args.nbt == 'graph2_ppp':
-        from BeliefTrackerShareSA_cls_graph2_ppp import BeliefTracker
-    elif args.nbt == 'graph2_p_baseline':
-        from BeliefTrackerShareSA_cls_graph2_plus_baseline import BeliefTracker
-    elif args.nbt == 'graph2_p_stack':
-        from BeliefTrackerShareSA_cls_graph2_plus_stack import BeliefTracker
-    elif args.nbt == 'graph_multi_view':
-        from BeliefTrackerShareSA_cls_graph_multi_view import BeliefTracker
-    elif args.nbt == 'graph_multi_view2':
-        from BeliefTrackerShareSA_cls_graph_multi_view2 import BeliefTracker
-    elif args.nbt == 'graph_multi_view3':
-        from BeliefTrackerShareSA_cls_graph_multi_view3 import BeliefTracker
-    elif args.nbt == 'graph_multi_view4':
-        from BeliefTrackerShareSA_cls_graph_multi_view4 import BeliefTracker
-    elif args.nbt == 'graph3':
-        from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
-    elif args.nbt == 'graph4':
-        from BeliefTrackerShareSA_cls_graph4 import BeliefTracker
-    elif args.nbt == 'graph_re':
-        from BeliefTrackerShareSA_cls_graph_re import BeliefTracker
-    elif args.nbt == 's_xl':
-        from BeliefTrackerShareSA_flat_s_xl import BeliefTracker
-    elif args.nbt == 'context':
-        from BeliefTrackerShareSA_cls_context import BeliefTracker
-    elif args.nbt == 'context_verify':
-        from BeliefTrackerShareSA_cls_context_verify import BeliefTracker
-    elif args.nbt == 'context_stacked':
-        from BeliefTrackerShareSA_cls_context_stacked import BeliefTracker
-    elif args.nbt == 'context_stacked2':
-        from BeliefTrackerShareSA_cls_context_stacked2 import BeliefTracker
+        from BeliefTrackerSlotQueryMultiSlotTransformer import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -1062,19 +793,14 @@ def main():
             nb_tr_steps = 0
 
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", dynamic_ncols=True)):
-                model.train()
-
-                batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-                input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
+                batch = tuple(t.to(device) for t in batch)
+                input_ids, input_len, label_ids = batch
 
                 # Forward
-                # with torch.autograd.set_detect_anomaly(True):
                 if n_gpu == 1:
-                    loss, loss_slot, acc, _, acc_slot, _, _ = \
-                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                    loss, loss_slot, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
                 else:
-                    loss, _, acc, _, acc_slot, _, _ = \
-                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                    loss, _, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
 
                     # average to multi-gpus
                     loss = loss.mean()
@@ -1118,137 +844,102 @@ def main():
                     optimizer.zero_grad()
                     global_step += 1
 
-                    if global_step % args.per_eval_steps == 0:
+            # Perform evaluation on validation dataset
+            model.eval()
+            dev_loss = 0
+            dev_acc = 0
+            dev_loss_slot, dev_acc_slot = None, None
+            nb_dev_examples, nb_dev_steps = 0, 0
 
-                        # Perform evaluation on validation dataset
-                        model.eval()
-                        dev_loss = 0
-                        dev_acc = 0
-                        dev_type_acc = 0
-                        dev_loss_slot, dev_acc_slot, dev_acc_slot_type = None, None, None
-                        nb_dev_examples, nb_dev_steps = 0, 0
+            for step, batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
+                batch = tuple(t.to(device) for t in batch)
+                input_ids, input_len, label_ids = batch
+                if input_ids.dim() == 2:
+                    input_ids = input_ids.unsqueeze(0)
+                    input_len = input_len.unsqueeze(0)
+                    label_ids = label_ids.unsuqeeze(0)
 
-                        for _, eval_batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
-                            eval_batch = tuple(t.to(device) for t in eval_batch)
-                            input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = eval_batch
-                            batch_size = input_ids.size(0)
-                            if input_ids.dim() == 2:
-                                input_ids = input_ids.unsqueeze(0)
-                                token_type_ids = token_type_ids.unsqueeze(0)
-                                input_mask = input_mask.unsqueeze(0)
-                                answer_type_ids = answer_type_ids.unsqueeze(0)
-                                label_ids = label_ids.unsuqeeze(0)
+                with torch.no_grad():
+                    if n_gpu == 1:
+                        loss, loss_slot, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
+                    else:
+                        loss, _, acc, acc_slot, _ = model(input_ids, input_len, label_ids, n_gpu)
 
-                            with torch.no_grad():
-                                if n_gpu == 1:
-                                    loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, _ \
-                                        = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
-                                else:
-                                    loss, _, acc, type_acc, acc_slot, type_acc_slot, _ \
-                                        = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        # average to multi-gpus
+                        loss = loss.mean()
+                        acc = acc.mean()
+                        acc_slot = acc_slot.mean(0)
 
-                                    # average to multi-gpus
-                                    loss = loss.mean()
-                                    acc = acc.mean()
-                                    acc_slot = acc_slot.mean(0)
+                num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()
+                dev_loss += loss.item() * num_valid_turn
+                dev_acc += acc.item() * num_valid_turn
 
-                            num_valid_turn = torch.sum(answer_type_ids[:, :, 0].view(-1) > -1,
-                                                       0).item()  # valid turns for all current batch
-                            # dev_loss += loss.item() * num_valid_turn
-                            dev_acc += acc.item() * num_valid_turn
-                            dev_loss += loss.item() * batch_size
-                            dev_type_acc += type_acc.item() * num_valid_turn
-                            # dev_acc += acc.item()
+                if n_gpu == 1:
+                    if dev_loss_slot is None:
+                        dev_loss_slot = [l * num_valid_turn for l in loss_slot]
+                        dev_acc_slot = acc_slot * num_valid_turn
+                    else:
+                        for i, l in enumerate(loss_slot):
+                            dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
+                        dev_acc_slot += acc_slot * num_valid_turn
 
-                            if n_gpu == 1:
-                                if dev_loss_slot is None:
-                                    # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
-                                    dev_acc_slot = acc_slot * num_valid_turn
-                                    dev_acc_slot_type = type_acc_slot * num_valid_turn
-                                    dev_loss_slot = [l * batch_size for l in loss_slot]
-                                    # dev_acc_slot = acc_slot
-                                else:
-                                    for i, l in enumerate(loss_slot):
-                                        # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
-                                        dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
-                                    dev_acc_slot += acc_slot * num_valid_turn
-                                    dev_acc_slot_type += type_acc_slot * num_valid_turn
-                                    # dev_acc_slot += acc_slot
+                nb_dev_examples += num_valid_turn
 
-                            nb_dev_examples += num_valid_turn
+            dev_loss = dev_loss / nb_dev_examples
+            dev_acc = dev_acc / nb_dev_examples
 
-                        # dev_loss = dev_loss / nb_dev_examples
-                        dev_loss = dev_loss / all_input_ids_dev.size(0)
-                        dev_acc = dev_acc / nb_dev_examples
-                        dev_type_acc = dev_type_acc / nb_dev_examples
+            if n_gpu == 1:
+                dev_acc_slot = dev_acc_slot / nb_dev_examples
 
-                        if n_gpu == 1:
-                            dev_acc_slot = dev_acc_slot / nb_dev_examples
-                            dev_acc_slot_type = dev_acc_slot_type / nb_dev_examples
+            # tensorboard logging
+            if summary_writer is not None:
+                summary_writer.add_scalar("Validate/Loss", dev_loss, global_step)
+                summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
+                if n_gpu == 1:
+                    for i, slot in enumerate(processor.target_slot):
+                        summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'), dev_loss_slot[i] / nb_dev_examples,
+                                                  global_step)
+                        summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i], global_step)
 
-                        # tensorboard logging
-                        if summary_writer is not None:
-                            summary_writer.add_scalar("Validate/Loss", dev_loss, global_step)
-                            summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
-                            summary_writer.add_scalar("Validate/Cls_Acc", dev_type_acc, global_step)
-                            if n_gpu == 1:
-                                for i, slot in enumerate(processor.target_slot):
-                                    summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
-                                                              dev_loss_slot[i] / all_input_ids_dev.size(0), global_step)
-                                    summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i],
-                                                              global_step)
-                                    summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
-                                                              global_step)
-                                if hasattr(model, "get_metric"):
-                                    metric = model.get_metric(reset=True)
-                                    for k, v in metric.items():
-                                        summary_writer.add_scalar(f"Validate/{k}", v, global_step)
+            dev_loss = round(dev_loss, 6)
+            if last_update is None or dev_acc > best_acc:
+                output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
+                if args.do_train:
+                    if n_gpu == 1:
+                        torch.save(model.state_dict(), output_model_file)
+                    else:
+                        torch.save(model.module.state_dict(), output_model_file)
 
-                        dev_loss = round(dev_loss, 6)
-                        if last_update is None or dev_acc > best_acc:
-                            # Save a trained model
-                            output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
-                            if args.do_train:
-                                if n_gpu == 1:
-                                    torch.save(model.state_dict(), output_model_file)
-                                else:
-                                    torch.save(model.module.state_dict(), output_model_file)
+                last_update = epoch
+                best_acc = dev_acc
 
-                            last_update = global_step
-                            best_acc = dev_acc
+                logger.info(
+                    "Model Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
+                        epoch, dev_loss, best_acc))
+            else:
+                logger.info(
+                    "Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
+                        epoch, dev_loss, dev_acc))
 
-                            logger.info(
-                                "Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
-                                    global_step, dev_loss, best_acc))
-                        else:
-                            logger.info(
-                                "Model NOT Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
-                                    global_step, dev_loss, dev_acc))
+            if last_loss_update is None or dev_loss < best_loss:
+                # Save a trained model
+                output_model_file = os.path.join(args.output_dir, "pytorch_model_loss.bin")
+                if args.do_train:
+                    if n_gpu == 1:
+                        torch.save(model.state_dict(), output_model_file)
+                    else:
+                        torch.save(model.module.state_dict(), output_model_file)
 
-                        if last_loss_update is None or dev_loss < best_loss:
-                            # Save a trained model
-                            output_model_file = os.path.join(args.output_dir, "pytorch_model_loss.bin")
-                            if args.do_train:
-                                if n_gpu == 1:
-                                    torch.save(model.state_dict(), output_model_file)
-                                else:
-                                    torch.save(model.module.state_dict(), output_model_file)
+                last_loss_update = epoch
+                best_loss = dev_loss
 
-                            last_loss_update = global_step
-                            best_loss = dev_loss
+                logger.info(
+                    "***Lowest Loss Model Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f ***" % (epoch, best_loss, dev_acc))
+            else:
+                logger.info(
+                    "***Lowest Loss Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f  ***" % (epoch, dev_loss, dev_acc))
 
-                            logger.info(
-                                "Lowest Loss Model Updated: Global Step=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
-                                    global_step, best_loss, dev_acc))
-                        else:
-                            logger.info(
-                                "Lowest Loss Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
-                                    global_step, dev_loss, dev_acc))
-
-                        if last_update + args.patience * args.per_eval_steps <= global_step:
-                            break
-
-            if last_update + args.patience * args.per_eval_steps <= global_step:
+            if last_update + args.patience <= epoch:
                 break
 
     ###############################################################################
@@ -1291,19 +982,15 @@ def main():
         # Evaluation
         if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 
-            eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation,
-                                                        test_file=args.test_file)
-            all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
+            eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation, test_file=args.test_file)
+            all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-            all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
-            # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device),
-            # all_label_ids.to(device)
+            all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
             logger.info("***** Running evaluation *****")
             logger.info("  Num examples = %d", len(eval_examples))
             logger.info("  Batch size = %d", args.eval_batch_size)
 
-            eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
-                                      all_label_ids)
+            eval_data = TensorDataset(all_input_ids, all_input_len, all_label_ids)
 
             # Run prediction for full data
             eval_sampler = SequentialSampler(eval_data)
@@ -1326,38 +1013,26 @@ def main():
                           'num_slot_attraction': 0,
                           'joint_train': 0, 'joint_type_train': 0, 'slot_train': 0, 'slot_type_train': 0,
                           'num_slot_train': 0}
-            predictions = []
+            # predictions = []
 
-            for input_ids, token_type_ids, input_mask, answer_type_ids, label_ids in tqdm(eval_dataloader,
-                                                                                          desc="Evaluating"):
-                input_ids = input_ids.to(device)
-                token_type_ids = token_type_ids.to(device)
-                input_mask = input_mask.to(device)
-                answer_type_ids = answer_type_ids.to(device)
-                label_ids = label_ids.to(device)
+            for input_ids, input_len, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
                 if input_ids.dim() == 2:
                     input_ids = input_ids.unsqueeze(0)
-                    token_type_ids = token_type_ids.unsqueeze(0)
-                    input_mask = input_mask.unsqueeze(0)
-                    answer_type_ids = answer_type_ids.unsqueeze(0)
+                    input_len = input_len.unsqueeze(0)
                     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        loss, loss_slot, acc, acc_slot, pred_slot = model(input_ids, input_len, label_ids, n_gpu)
                     else:
-                        loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        loss, _, acc, acc_slot, pred_slot = model(input_ids, input_len, label_ids, n_gpu)
                         nbatch = label_ids.size(0)
                         nslot = pred_slot.size(3)
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
 
-                accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
-                predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor,
-                                                   gate=model.get_gate_metric(reset=True) if args.save_gate else None))
+                accuracies = eval_all_accs(pred_slot, label_ids, accuracies)
 
-                nb_eval_ex = (answer_type_ids[:, :, 0].view(-1) != -1).sum().item()
+                nb_eval_ex = (label_ids[:, :, 0].view(-1) != -1).sum().item()
                 nb_eval_examples += nb_eval_ex
                 nb_eval_steps += 1
 
@@ -1405,13 +1080,6 @@ def main():
                 for key in sorted(result.keys()):
                     logger.info("  %s = %s", key, str(result[key]))
                     writer.write("%s = %s\n" % (key, str(result[key])))
-
-            with open(os.path.join(args.output_dir, f"predictions_{state_name}.json"), 'w') as f:
-                json.dump(predictions, f, indent=2)
-
-            if hasattr(model, "get_metric"):
-                with open(os.path.join(args.output_dir, f"eval_metric_{state_name}.json"), 'w') as f:
-                    json.dump(model.get_metric(reset=False), f, indent=2)
 
             out_file_name = f'eval_all_accuracies_{state_name}'
             with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
@@ -1465,139 +1133,55 @@ def main():
                     ))
 
 
-def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
-    answer_type_pred = pred_slot[:, :, :, 0]
-    pred_slot = pred_slot[:, :, :, 1]
-
-    def _eval_acc(_answer_type_pred, _pred_slot, _answer_type_ids, _labels):
+def eval_all_accs(pred_slot, labels, accuracies):
+    def _eval_acc(_pred_slot, _labels):
         slot_dim = _labels.size(-1)
-        classify_mask = ((_answer_type_ids != -1) * (_answer_type_ids != 2)).view(-1, slot_dim)
-        value_accuracy = (_pred_slot == _labels).view(-1, slot_dim).masked_fill(classify_mask, 1)
-        answer_type_accuracy = (_answer_type_pred == _answer_type_ids).view(-1, slot_dim)
-        accuracy = value_accuracy * answer_type_accuracy
-        # accuracy = (_pred_slot == _labels).view(-1, slot_dim)
-        num_turn = torch.sum(_answer_type_ids[:, :, 0].view(-1) > -1, 0).float()
-        num_data = torch.sum(_answer_type_ids > -1).float()
+        accuracy = (_pred_slot == _labels).view(-1, slot_dim)
+        num_turn = torch.sum(_labels[:, :, 0].view(-1) > -1, 0).float()
+        num_data = torch.sum(_labels > -1).float()
         # joint accuracy
         joint_acc = sum(torch.sum(accuracy, 1) / slot_dim).float()
-        joint_acc_type = sum(torch.sum(answer_type_accuracy, dim=1) // slot_dim).float()
         # slot accuracy
         slot_acc = torch.sum(accuracy).float()
-        slot_acc_type = torch.sum(answer_type_accuracy).float()
-        return joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data
+        return joint_acc, slot_acc, num_turn, num_data
 
     # restaurant domain
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 13:20], pred_slot[:, :, 13:20], answer_type_ids[:, :, 13:20], labels[:, :, 13:20])
-    accuracies['num_turn'] += num_turn
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 13:20], labels[:, :, 13:20])
     accuracies['joint_rest'] += joint_acc
-    accuracies['joint_type_rest'] += joint_acc_type
     accuracies['slot_rest'] += slot_acc
-    accuracies['slot_type_rest'] += slot_acc_type
     accuracies['num_slot_rest'] += num_data
 
     # taxi domain
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 20:24], pred_slot[:, :, 20:24], answer_type_ids[:, :, 20:24], labels[:, :, 20:24])
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 20:24], labels[:, :, 20:24])
     accuracies['joint_taxi'] += joint_acc
-    accuracies['joint_type_taxi'] += joint_acc_type
     accuracies['slot_taxi'] += slot_acc
-    accuracies['slot_type_taxi'] += slot_acc_type
     accuracies['num_slot_taxi'] += num_data
 
     # attraction
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 0:3], pred_slot[:, :, 0:3], answer_type_ids[:, :, 0:3], labels[:, :, 0:3])
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 0:3], labels[:, :, 0:3])
     accuracies['joint_attraction'] += joint_acc
-    accuracies['joint_type_attraction'] += joint_acc_type
     accuracies['slot_attraction'] += slot_acc
-    accuracies['slot_type_attraction'] += slot_acc_type
     accuracies['num_slot_attraction'] += num_data
 
     # hotel
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 3:13], pred_slot[:, :, 3:13], answer_type_ids[:, :, 3:13], labels[:, :, 3:13])
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 3:13], labels[:, :, 3:13])
     accuracies['joint_hotel'] += joint_acc
-    accuracies['joint_type_hotel'] += joint_acc_type
     accuracies['slot_hotel'] += slot_acc
-    accuracies['slot_type_hotel'] += slot_acc_type
     accuracies['num_slot_hotel'] += num_data
 
     # train
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 24:], pred_slot[:, :, 24:], answer_type_ids[:, :, 24:], labels[:, :, 24:])
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 24:], labels[:, :, 24:])
     accuracies['joint_train'] += joint_acc
-    accuracies['joint_type_train'] += joint_acc_type
     accuracies['slot_train'] += slot_acc
-    accuracies['slot_type_train'] += slot_acc_type
     accuracies['num_slot_train'] += num_data
 
     # 5 domains (excluding bus and hotel domain)
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred, pred_slot, answer_type_ids, labels)
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot, labels)
     accuracies['joint5'] += joint_acc
-    accuracies['joint_type5'] += joint_acc_type
     accuracies['slot5'] += slot_acc
-    accuracies['slot_type5'] += slot_acc_type
     accuracies['num_slot5'] += num_data
 
     return accuracies
-
-
-def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor, gate=None):
-    """
-    :param pred_slots:
-    :param answer_type_ids:
-    :param labels:
-    :param processor:
-    :param gate: [slot_dim, ds, ts - 1, 1]
-    :return:
-    """
-    answer_type_pred = pred_slots[:, :, :, 0]
-    pred_slots = pred_slots[:, :, :, 1]
-    type_vocab = ['none', 'do not care', 'value']
-    predictions = []
-    ds = pred_slots.size(0)
-    ts = pred_slots.size(1)
-    slot_dim = pred_slots.size(-1)
-    if gate is not None:
-        assert gate.size() == (slot_dim, ds, ts - 1)
-    for i in range(ds):
-        dialog_pred = []
-        for j in range(ts):
-            if answer_type_ids[i, j, 0] == -1:
-                break
-            slot_pred = {}
-            for slot_idx in range(slot_dim):
-                slot = processor.target_slot[slot_idx]
-                pred_answer_type = type_vocab[answer_type_pred[i, j, slot_idx]]
-                gold_answer_type = type_vocab[answer_type_ids[i, j, slot_idx]]
-                pred_label = -1 if pred_slots[i, j, slot_idx] == -1 else processor.ontology[slot][
-                    pred_slots[i][j][slot_idx]]
-                gold_label = -1 if labels[i, j, slot_idx] == -1 else processor.ontology[slot][labels[i][j][slot_idx]]
-                # dialog_pred.append({
-                #     "turn": j,
-                #     "slot": slot,
-                #     "predict_value": pred_label,
-                #     "gold_label": gold_label,
-                #     "pred_answer_type": pred_answer_type,
-                #     "gold_answer_type": gold_answer_type
-                # })
-                slot_pred[slot] = {
-                    "predict_value": pred_label,
-                    "gold_label": gold_label,
-                    "predict_answer_type": pred_answer_type,
-                    "gold_answer_type": gold_answer_type
-                }
-
-                if gate is not None:
-                    if j == 0:
-                        slot_pred[slot]['gate'] = 0
-                    else:
-                        slot_pred[slot]['gate'] = gate[slot_idx, i, j - 1].item()
-            dialog_pred.append(slot_pred)
-        predictions.append(dialog_pred)
-    return predictions
 
 
 if __name__ == "__main__":

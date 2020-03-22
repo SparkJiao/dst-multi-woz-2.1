@@ -10,11 +10,11 @@ from torch.nn import CosineEmbeddingLoss
 from pytorch_pretrained_bert.modeling import BertModel
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel
 
-
 try:
     from . import layers
 except ImportError:
     import layers
+
 
 class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config):
@@ -92,6 +92,7 @@ class BeliefTracker(nn.Module):
         self.zero_init_rnn = args.zero_init_rnn
         self.max_seq_length = args.max_seq_length
         self.max_label_length = args.max_label_length
+        self.max_slot_length = args.max_slot_length
         self.num_labels = num_labels
         self.num_slots = len(num_labels)
         self.attn_head = args.attn_head
@@ -178,13 +179,14 @@ class BeliefTracker(nn.Module):
         # Slot encoding
         slot_type_ids = torch.zeros(slot_ids.size(), dtype=torch.long).to(self.device)
         slot_mask = slot_ids > 0
-        hid_slot, _ = self.sv_encoder(slot_ids.view(-1, self.max_label_length),
-                                      slot_type_ids.view(-1, self.max_label_length),
-                                      slot_mask.view(-1, self.max_label_length),
+        hid_slot, _ = self.sv_encoder(slot_ids.view(-1, self.max_slot_length),
+                                      slot_type_ids.view(-1, self.max_slot_length),
+                                      slot_mask.view(-1, self.max_slot_length),
                                       output_all_encoded_layers=False)
         hid_slot = hid_slot[:, 0, :]
         hid_slot = hid_slot.detach()
         self.slot_lookup = nn.Embedding.from_pretrained(hid_slot, freeze=True)
+        print(self.slot_lookup.weight.size())
 
         for s, label_id in enumerate(label_ids):
             label_type_ids = torch.zeros(label_id.size(), dtype=torch.long).to(self.device)
@@ -231,7 +233,7 @@ class BeliefTracker(nn.Module):
                                            token_type_ids.view(-1, self.max_seq_length),
                                            attention_mask.view(-1, self.max_seq_length),
                                            output_all_encoded_layers=False)
-        hidden = torch.mul(hidden, attention_mask.view(-1, self.max_seq_length, 1).expand(hidden.size()).float())
+        hidden = torch.mul(hidden, attention_mask.view(-1, self.max_seq_length, 1).expand(hidden.size()).to(dtype=hidden.dtype))
         hidden = hidden.repeat(slot_dim, 1, 1)  # [(slot_dim*ds*ts), bert_seq, hid_size]
 
         hid_slot = self.slot_lookup.weight[target_slot, :]  # Select target slot embedding
