@@ -1180,6 +1180,7 @@ def eval_all_accs(pred_slot, labels, accuracies):
     accuracies['joint5'] += joint_acc
     accuracies['slot5'] += slot_acc
     accuracies['num_slot5'] += num_data
+    accuracies['num_turn'] += num_turn
 
     return accuracies
 

@@ -947,6 +947,8 @@ def main():
         from BeliefTrackerShareSA_cls_graph_multi_view3 import BeliefTracker
     elif args.nbt == 'graph_multi_view4':
         from BeliefTrackerShareSA_cls_graph_multi_view4 import BeliefTracker
+    elif args.nbt == 'graph_multi_view5':
+        from BeliefTrackerShareSA_cls_graph_multi_view5 import BeliefTracker
     elif args.nbt == 'graph3':
         from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
     elif args.nbt == 'graph4':
