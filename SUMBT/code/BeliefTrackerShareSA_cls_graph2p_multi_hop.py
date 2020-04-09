@@ -125,6 +125,20 @@ class BeliefTracker(nn.Module):
 
         diag_attn_hidden_dim = int(args.diag_attn_hidden_scale * self.bert_output_dim)
         logger.info(f'Diagonal attention hidden size: {diag_attn_hidden_dim}')
+
+        self.hops = args.num_layers
+        logger.info(f'Multi-Hops: {self.hops}')
+        self.hop_mask_self = not args.hop_update_self
+        logger.info(f'Multi-Hop update self: {self.hop_mask_self}')
+        self.attention_layers = nn.ModuleList()
+        self.fusion_layers = nn.ModuleList()
+        for i in range(self.hops):
+            self.attention_layers.append(layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim,
+                                                                  dropout=self.hidden_dropout_prob,
+                                                                  act_fn=ACT2FN[args.diag_attn_act_fn]))
+            self.fusion_layers.append(layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
+                                                           act_fn=ACT2FN[args.fusion_act_fn]))
+
         self.diag_attn_act = args.diag_attn_act
         self.value_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob,
                                                         act_fn=ACT2FN[args.diag_attn_act_fn])
@@ -225,8 +239,6 @@ class BeliefTracker(nn.Module):
         self.save_gate = args.save_gate
         if args.save_gate:
             self.gate_metric = []
-            self.value_scores = []
-            self.graph_scores = []
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -347,10 +359,8 @@ class BeliefTracker(nn.Module):
         # Value supervision
         masked_value_scores = layers.masked_log_softmax_fp16(value_scores, value_mask, dim=-1)
         masked_value_scores = masked_value_scores.view(slot_dim, ds, ts, -1)
-        if self.save_gate and not self.training:
-            self.value_scores.append(torch.softmax(masked_value_scores, dim=-1).detach().cpu().float())
 
-        # Construct graph
+        # Graph propagation
         hidden = hidden.view(slot_dim, ds, ts, -1)
         graph_value = value_hidden.view(slot_dim, ds, ts, -1)[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
         graph_query = hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
@@ -362,6 +372,11 @@ class BeliefTracker(nn.Module):
             else:
                 graph_key = graph_key + graph_value
 
+        for i in range(self.hops):
+            graph_hidden, graph_scores = self.attention_layers[i](graph_query, graph_key, x3=graph_key, x2_mask=None,
+                                                                  drop_diagonal=self.hop_mask_self, return_scores=True)
+            graph_query, gate = self.fusion_layers[i](graph_query, graph_hidden)
+
         # graph_mask = graph_key.new_zeros(graph_key.size()[:-1])[:, None, None, :]
         # if self.inter_domain:
         #     graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
@@ -370,9 +385,6 @@ class BeliefTracker(nn.Module):
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
         if self.diag_attn_act:
             graph_hidden = self.graph_act(graph_hidden)
-
-        if self.save_gate and not self.training:
-            self.graph_scores.append(torch.softmax(graph_scores.view(ds, ts - 1, slot_dim, -1), dim=-1).detach().cpu())
 
         # Fusion
         if self.fuse_type == 0:
@@ -531,16 +543,3 @@ class BeliefTracker(nn.Module):
         if reset:
             self.gate_metric.clear()
         return metric
-
-    def get_value_scores(self, reset=False):
-        value_scores = torch.cat(self.value_scores, dim=1)
-        value_scores = value_scores.max(dim=-1)
-        if reset:
-            self.value_scores.clear()
-        return value_scores
-
-    def get_graph_scores(self, reset=False):
-        graph_scores = torch.cat(self.graph_scores, dim=0)
-        if reset:
-            self.graph_scores.clear()
-        return graph_scores

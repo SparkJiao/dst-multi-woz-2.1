@@ -706,6 +706,12 @@ def main():
     parser.add_argument('--transfer_sup', default=0, type=float)
     parser.add_argument('--save_gate', default=False, action='store_true')
     parser.add_argument('--slot_res', default=None, type=str)
+    parser.add_argument('--key_add_value', default=False, action='store_true')
+    parser.add_argument('--key_add_value_pro', default=False, action='store_true')
+    parser.add_argument('--add_relu', default=False, action='store_true')
+    parser.add_argument('--add_weight', default=False, action='store_true')
+    parser.add_argument('--num_layers', default=0, type=int)
+    parser.add_argument('--hop_update_self', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -931,6 +937,12 @@ def main():
         from BeliefTrackerShareSA_cls_graph2_gate import BeliefTracker
     elif args.nbt == 'graph2_p':
         from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
+    elif args.nbt == 'graph2_p_test':
+        from BeliefTrackerShareSA_cls_graph2_plus_test import BeliefTracker
+    elif args.nbt == 'graph2_p_emb_baseline':
+        from BeliefTrackerShareSA_cls_graph2_plus_emb_baseline import BeliefTracker
+    elif args.nbt == 'graph2p_multi_hop':
+        from BeliefTrackerShareSA_cls_graph2p_multi_hop import BeliefTracker
     elif args.nbt == 'graph2_pp':
         from BeliefTrackerShareSA_cls_graph2_pp import BeliefTracker
     elif args.nbt == 'graph2_ppp':
@@ -953,8 +965,12 @@ def main():
         from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
     elif args.nbt == 'graph4':
         from BeliefTrackerShareSA_cls_graph4 import BeliefTracker
+    elif args.nbt == 'graph5':
+        from BeliefTrackerShareSA_cls_graph5 import BeliefTracker
     elif args.nbt == 'graph_re':
         from BeliefTrackerShareSA_cls_graph_re import BeliefTracker
+    elif args.nbt == 'copy':
+        from BeliefTrackerShareSA_cls_copy import BeliefTracker
     elif args.nbt == 's_xl':
         from BeliefTrackerShareSA_flat_s_xl import BeliefTracker
     elif args.nbt == 'context':
@@ -1357,7 +1373,9 @@ def main():
 
                 accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
                 predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor,
-                                                   gate=model.get_gate_metric(reset=True) if args.save_gate else None))
+                                                   gate=model.get_gate_metric(reset=True) if args.save_gate else None,
+                                                   value_scores=model.get_value_scores(reset=True) if args.save_gate else None,
+                                                   graph_scores=model.get_graph_scores(reset=True) if args.save_gate else None))
 
                 nb_eval_ex = (answer_type_ids[:, :, 0].view(-1) != -1).sum().item()
                 nb_eval_examples += nb_eval_ex
@@ -1546,7 +1564,8 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
     return accuracies
 
 
-def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor, gate=None):
+def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor, gate=None,
+                    value_scores=None, graph_scores=None):
     """
     :param pred_slots:
     :param answer_type_ids:
@@ -1564,6 +1583,13 @@ def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor, g
     slot_dim = pred_slots.size(-1)
     if gate is not None:
         assert gate.size() == (slot_dim, ds, ts - 1)
+    if value_scores is not None:
+        # assert value_scores.size()[:-1] == (slot_dim, ds, ts)
+        value_prob, value_idx = value_scores
+        assert value_prob.size() == (slot_dim, ds, ts)
+    if graph_scores is not None:
+        assert graph_scores.size() == (ds, ts - 1, slot_dim, slot_dim)
+        # graph_scores = graph_scores.reshape(ds, ts - 1, slot_dim, slot_dim)
     for i in range(ds):
         dialog_pred = []
         for j in range(ts):
@@ -1597,6 +1623,14 @@ def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor, g
                         slot_pred[slot]['gate'] = 0
                     else:
                         slot_pred[slot]['gate'] = gate[slot_idx, i, j - 1].item()
+                if value_scores is not None:
+                    slot_pred[slot]['value_prob'] = value_prob[slot_idx, i, j].item()
+                    slot_pred[slot]['value_str'] = processor.ontology[slot][value_idx[slot_idx, i, j]]
+                if graph_scores is not None:
+                    if j == 0:
+                        slot_pred[slot]['graph_scores'] = [0] * slot_dim
+                    else:
+                        slot_pred[slot]['graph_scores'] = graph_scores[i, j - 1, slot_idx].tolist()
             dialog_pred.append(slot_pred)
         predictions.append(dialog_pred)
     return predictions

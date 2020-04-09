@@ -7,6 +7,7 @@ from allennlp.training.metrics import Average
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel, gelu
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
+from copy import deepcopy
 
 try:
     from . import layers
@@ -88,76 +89,27 @@ class BeliefTracker(nn.Module):
         nbt_config.hidden_dropout_prob = self.hidden_dropout_prob
         logger.info(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         logger.info(f"Dialog Self Attention add residual: {args.sa_add_residual}")
-        last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
-        if args.override_attn:
-            logger.info("Override self attention from last layer of BERT")
-            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                         add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual,
-                                                         self_attention=last_attention)
-        else:
-            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                         add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual)
-        if args.share_position_weight:
-            logger.info("Dialog self attention will share position embeddings with BERT")
-            self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
-        logger.info(f"If extra neural belief tracker: {args.extra_nbt}")
-        self.extra_nbt = args.extra_nbt
-        if self.extra_nbt:
-            nbt_config.num_attention_heads = args.extra_nbt_attn_head
-            self.override_attn_extra = args.override_attn_extra
-            logger.info(f'If override self attention from last layer of BERT for extra belief tracker: {self.override_attn_extra}')
-            if self.override_attn_extra:
-                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                                add_layer_norm=args.sa_add_layer_norm,
-                                                                add_residual=args.sa_add_residual,
-                                                                self_attention=last_attention,
-                                                                no_position_embedding=args.sa_no_position_embedding)
-            else:
-                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                                add_layer_norm=args.sa_add_layer_norm,
-                                                                add_residual=args.sa_add_residual,
-                                                                no_position_embedding=args.sa_no_position_embedding)
-            if not args.sa_no_position_embedding and args.share_position_weight:
-                self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
+        self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                     add_layer_norm=args.sa_add_layer_norm,
+                                                     add_residual=args.sa_add_residual)
+        self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         diag_attn_hidden_dim = int(args.diag_attn_hidden_scale * self.bert_output_dim)
         logger.info(f'Diagonal attention hidden size: {diag_attn_hidden_dim}')
-        self.diag_attn_act = args.diag_attn_act
-        self.value_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob,
-                                                        act_fn=ACT2FN[args.diag_attn_act_fn])
-        if self.diag_attn_act is not None:
-            self.value_act = layers.MLP(self.bert_output_dim, self.bert_output_dim, self.diag_attn_act)
 
         self.mask_self = args.mask_self
         logger.info(f'If mask self during graph attention: {self.mask_self}')
         self.inter_domain = args.inter_domain
         logger.info(f'If do inter-domain graph attention: {self.inter_domain}')
-        self.key_add_value = args.key_add_value
-        logger.info(f'Slot attention key add value: {self.key_add_value}')
-        self.key_add_value_pro = args.key_add_value_pro
-        logger.info(f'Slot attention key add value with projection: {self.key_add_value_pro}')
-        if self.key_add_value_pro:
-            self.key_value_project = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+
+        self.diag_attn_act = args.diag_attn_act
         self.graph_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob,
                                                         act_fn=ACT2FN[args.diag_attn_act_fn])
         if self.diag_attn_act is not None:
             self.graph_act = layers.MLP(self.bert_output_dim, self.bert_output_dim, self.diag_attn_act)
 
-        self.fuse_type = args.fuse_type
-        logger.info(f'Fuse type: {self.fuse_type}')
-        if self.fuse_type == 0:
-            self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
-                                                      act_fn=ACT2FN[args.fusion_act_fn])
-        elif self.fuse_type == 1:
-            self.graph_project = layers.SimpleTransform(self.bert_output_dim)
-        elif self.fuse_type == 2:
-            self.graph_project = layers.FusionGate(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
-                                                   act_fn=ACT2FN[args.fusion_act_fn])
-        else:
-            raise RuntimeError()
+        self.gate_pro = nn.Linear(self.bert_output_dim * 4, 1)
 
         if args.slot_res is not None:
             self.slot_res = [int(x) for x in args.slot_res.split(":")]
@@ -173,6 +125,9 @@ class BeliefTracker(nn.Module):
                                             nn.Linear(self.bert_output_dim, 3))
         self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim, bias=False)
 
+        self.copy_classifier = deepcopy(self.classifier)
+        self.copy_hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim, bias=False)
+
         # Measure
         self.distance_metric = args.distance_metric
         if self.distance_metric == "cosine":
@@ -183,7 +138,8 @@ class BeliefTracker(nn.Module):
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         # Classifier
-        self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
+        # self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
+        self.nll = nn.NLLLoss(ignore_index=-1, reduction='sum')
         logger.info(f'Classification loss weight: {args.cls_loss_weight}')
         self.cls_loss_weight = args.cls_loss_weight
         logger.info(f"Graph scores supervision coherent: {args.graph_add_sup}")
@@ -336,36 +292,16 @@ class BeliefTracker(nn.Module):
         # Neural belief tracking
         hidden = self.transformer(hidden, None).view(slot_dim * bs, -1)
 
-        # Value attention
-        value_mask = self.value_mask
-        value_tensor = self.defined_values
-        value_hidden, value_scores = self.value_attention(hidden.view(slot_dim, bs, -1),
-                                                          value_tensor, x3=value_tensor, x2_mask=value_mask, return_scores=True)
-        if self.diag_attn_act:
-            value_hidden = self.value_act(value_hidden)
-
-        # Value supervision
-        masked_value_scores = layers.masked_log_softmax_fp16(value_scores, value_mask, dim=-1)
-        masked_value_scores = masked_value_scores.view(slot_dim, ds, ts, -1)
-        if self.save_gate and not self.training:
-            self.value_scores.append(torch.softmax(masked_value_scores, dim=-1).detach().cpu().float())
-
         # Construct graph
         hidden = hidden.view(slot_dim, ds, ts, -1)
-        graph_value = value_hidden.view(slot_dim, ds, ts, -1)[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        # graph_value = value_hidden.view(slot_dim, ds, ts, -1)[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
         graph_query = hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
         graph_key = hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
-
-        if self.key_add_value:
-            if self.key_add_value_pro:
-                graph_key = self.key_value_project(torch.cat([graph_key, graph_value], dim=-1))
-            else:
-                graph_key = graph_key + graph_value
 
         # graph_mask = graph_key.new_zeros(graph_key.size()[:-1])[:, None, None, :]
         # if self.inter_domain:
         #     graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
-        graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=None,
+        graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x2_mask=None,
                                                           drop_diagonal=self.mask_self, return_scores=True)
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
         if self.diag_attn_act:
@@ -374,19 +310,11 @@ class BeliefTracker(nn.Module):
         if self.save_gate and not self.training:
             self.graph_scores.append(torch.softmax(graph_scores.view(ds, ts - 1, slot_dim, -1), dim=-1).detach().cpu())
 
-        # Fusion
-        if self.fuse_type == 0:
-            graph_hidden, gate = self.graph_project(hidden[:, :, 1:], graph_hidden)
-            if self.save_gate and not self.training:
-                self.gate_metric.append(gate.detach().cpu().float())
-        else:
-            graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
-
         if self.slot_res is not None:
             ini_hidden = graph_query.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
             graph_hidden[self.slot_res, :, :, :] = ini_hidden[self.slot_res, :, :, :]
 
-        hidden = torch.cat([hidden[:, :, 0].unsqueeze(2), graph_hidden], dim=2)
+        copy_hidden = torch.cat([hidden[:, :, 0].unsqueeze(2), graph_hidden], dim=2)
 
         # Graph supervision
         loss = 0
@@ -402,15 +330,19 @@ class BeliefTracker(nn.Module):
             self.update_metric("transfer_loss", transfer_loss.item())
             loss += transfer_loss
 
-        # Extra neural belief tracking
-        if self.extra_nbt:
-            hidden = hidden.reshape(slot_dim * ds, ts, -1)
-            hidden = self.belief_tracker(hidden, None).view(slot_dim, ds, ts, -1)
+        # Gate
+        gate = torch.sigmoid(self.gate_pro(self.dropout(torch.cat([hidden, copy_hidden,
+                                                                   hidden - copy_hidden, hidden * copy_hidden], dim=-1))))
 
-        answer_type_logits = self.classifier(hidden)
-        _, answer_type_pred = answer_type_logits.max(dim=-1)
+        answer_type_prob = torch.softmax(self.classifier(hidden), dim=-1)
+        copy_answer_type_prob = torch.softmax(self.copy_classifier(copy_hidden), dim=-1)
+        # _, answer_type_pred = answer_type_logits.max(dim=-1)
+        mix_answer_type_prob = gate * answer_type_prob + (1 - gate) * copy_answer_type_prob
+        mix_answer_type_prob = torch.log(mix_answer_type_prob + 1e-6)
+        _, answer_type_pred = mix_answer_type_prob.max(dim=-1)
 
         hidden = self.hidden_output(hidden)
+        copy_hidden = self.copy_hidden_output(copy_hidden)
 
         # Label (slot-value) encoding
         loss_slot = []
@@ -427,15 +359,25 @@ class BeliefTracker(nn.Module):
             if self.distance_metric == 'product':
                 _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts, num_slot_labels, -1)
                 _hidden = hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
+                _copy_hidden = copy_hidden[s].unsqueeze(2).view(ds * ts, 1, -1)
                 _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
+                _copy_dist = self.metric(_copy_hidden, _hid_label).squeeze(1).reshape(ds, ts, num_slot_labels)
             else:
                 _hid_label = hid_label.unsqueeze(0).unsqueeze(0).repeat(ds, ts, 1, 1).view(ds * ts * num_slot_labels, -1)
                 _hidden = hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
                     ds * ts * num_slot_labels, -1)
+                _copy_hidden = copy_hidden[s, :, :, :].unsqueeze(2).repeat(1, 1, num_slot_labels, 1).view(
+                    ds * ts * num_slot_labels, -1)
                 _dist = self.metric(_hid_label, _hidden).view(ds, ts, num_slot_labels)
+                _copy_dist = self.metric(_hid_label, _copy_hidden).view(ds, ts, num_slot_labels)
 
             if self.distance_metric == "euclidean":
                 _dist = -_dist
+                _copy_dist = -_copy_dist
+
+            _dist = gate[s] * torch.softmax(_dist, dim=-1) + (1 - gate[s]) * torch.softmax(_copy_dist, dim=-1)
+            _dist = torch.log(_dist + 1e-6)
+
             _, pred = torch.max(_dist, -1)
             pred_slot.append(pred.view(ds, ts, 1))
             output.append(_dist)
@@ -450,16 +392,8 @@ class BeliefTracker(nn.Module):
                 matching_loss += _loss.item()
                 loss += _loss
 
-                if self.graph_value_sup > 0:
-                    graph_value_loss = nn.functional.nll_loss(masked_value_scores[s].view(bs, -1),
-                                                              masked_slot_labels_for_loss.view(-1), ignore_index=-1,
-                                                              reduction='sum') / ds
-                    graph_value_loss = self.graph_value_sup * graph_value_loss
-                    loss += graph_value_loss
-                    graph_loss += graph_value_loss.item()
-
             if answer_type_ids is not None:
-                cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
+                cls_loss = self.nll(mix_answer_type_prob[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 loss_slot[-1] += cls_loss.item()
                 cls_loss = cls_loss * self.cls_loss_weight
                 type_loss += cls_loss.item()

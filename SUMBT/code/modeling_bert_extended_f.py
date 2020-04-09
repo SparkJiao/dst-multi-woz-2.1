@@ -756,6 +756,55 @@ class SimpleDialogSelfAttention(BertPreTrainedModel):
         return sa_hidden
 
 
+class SimplifiedDialogSelfAttention(BertPreTrainedModel):
+    def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False, add_residual: bool = False,
+                 add_relu: bool = False, add_weight: bool = False):
+        super(SimplifiedDialogSelfAttention, self).__init__(config)
+
+        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+
+        self.sa = SimplifiedMHA(config, add_relu=add_relu, add_weight=add_weight)
+        self.add_output = add_output
+        self.add_layer_norm = add_layer_norm
+        self.add_residual = add_residual
+        if add_output:
+            output_module_list = [nn.Linear(config.hidden_size, config.hidden_size),
+                                  nn.Dropout(config.hidden_dropout_prob)]
+
+            self.sa_output = nn.Sequential(*output_module_list)
+            if self.add_layer_norm:
+                # self.saLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)  # fp16_opt_level == O1 will cause a error
+                self.saLayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+
+        self.apply(self.init_bert_weights)
+
+    def forward(self, hidden, attention_mask=None):
+
+        seq_length = hidden.size(1)
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=hidden.device)
+        hidden = self.LayerNorm(hidden + self.position_embeddings(position_ids).unsqueeze(0).expand_as(hidden))
+        hidden = self.dropout(hidden)
+
+        if attention_mask is None:
+            attention_mask = hidden.new_ones(hidden.size()[:-1], dtype=torch.long)
+        causal_mask = position_ids[None, None, :].repeat(hidden.size(0), seq_length, 1) <= position_ids[None, :, None]
+        extended_mask = causal_mask[:, None, :, :].long() * attention_mask[:, None, None, :]
+        extended_mask = extended_mask.to(hidden.dtype)
+        extended_mask = (1.0 - extended_mask) * -10000.0
+
+        sa_hidden, _ = self.sa(hidden, hidden, hidden, extended_mask)
+        if self.add_output:
+            sa_hidden = self.sa_output(sa_hidden)
+            if self.add_layer_norm:
+                if self.add_residual:
+                    sa_hidden = hidden + sa_hidden
+                sa_hidden = self.saLayerNorm(sa_hidden)
+
+        return sa_hidden
+
+
 class SimpleSelfAttention(BertPreTrainedModel):
     def __init__(self, config: BertConfig, add_output: bool = True, add_layer_norm: bool = False, add_residual: bool = False):
         super(SimpleSelfAttention, self).__init__(config)
@@ -875,6 +924,64 @@ class MultiHeadAttention(nn.Module):
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(*new_context_layer_shape)
+        return context_layer, (mixed_query_layer, mixed_key_layer, mixed_value_layer)
+
+
+class SimplifiedMHA(nn.Module):
+    def __init__(self, config, add_relu=False, add_weight=False):
+        super(SimplifiedMHA, self).__init__()
+        if config.hidden_size % config.num_attention_heads != 0:
+            raise ValueError(
+                "The hidden size (%d) is not a multiple of the number of attention "
+                "heads (%d)" % (config.hidden_size, config.num_attention_heads))
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=False)
+        if not add_weight:
+            self.key = self.query  # share weight
+        else:
+            self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=False)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=False)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.add_relu = add_relu
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(self, query, key, value, attention_mask):
+        mixed_query_layer = self.query(query)
+        mixed_key_layer = self.key(key)
+        mixed_value_layer = self.value(value)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores = attention_scores + attention_mask
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        if self.add_relu:
+            context_layer = torch.relu(context_layer)
         return context_layer, (mixed_query_layer, mixed_key_layer, mixed_value_layer)
 
 

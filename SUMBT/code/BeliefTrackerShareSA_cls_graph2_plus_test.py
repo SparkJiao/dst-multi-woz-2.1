@@ -10,11 +10,11 @@ from torch.nn import functional as F
 
 try:
     from . import layers
-    from .modeling_bert_extended_f import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from .modeling_bert_extended_f import BertModel, SimpleSelfAttention, SimplifiedDialogSelfAttention
     from .global_logger import get_child_logger
 except ImportError:
     import layers
-    from modeling_bert_extended_f import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
+    from modeling_bert_extended_f import BertModel, SimpleSelfAttention, SimplifiedDialogSelfAttention
     from global_logger import get_child_logger
 
 logger: Logger = get_child_logger(__name__)
@@ -88,17 +88,10 @@ class BeliefTracker(nn.Module):
         nbt_config.hidden_dropout_prob = self.hidden_dropout_prob
         logger.info(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         logger.info(f"Dialog Self Attention add residual: {args.sa_add_residual}")
-        last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
-        if args.override_attn:
-            logger.info("Override self attention from last layer of BERT")
-            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+        self.transformer = SimplifiedDialogSelfAttention(nbt_config, add_output=True,
                                                          add_layer_norm=args.sa_add_layer_norm,
                                                          add_residual=args.sa_add_residual,
-                                                         self_attention=last_attention)
-        else:
-            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                         add_layer_norm=args.sa_add_layer_norm,
-                                                         add_residual=args.sa_add_residual)
+                                                         add_relu=args.add_relu, add_weight=args.add_weight)
         if args.share_position_weight:
             logger.info("Dialog self attention will share position embeddings with BERT")
             self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
@@ -107,20 +100,12 @@ class BeliefTracker(nn.Module):
         self.extra_nbt = args.extra_nbt
         if self.extra_nbt:
             nbt_config.num_attention_heads = args.extra_nbt_attn_head
-            self.override_attn_extra = args.override_attn_extra
-            logger.info(f'If override self attention from last layer of BERT for extra belief tracker: {self.override_attn_extra}')
-            if self.override_attn_extra:
-                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
+            self.belief_tracker = SimplifiedDialogSelfAttention(nbt_config, add_output=True,
                                                                 add_layer_norm=args.sa_add_layer_norm,
                                                                 add_residual=args.sa_add_residual,
-                                                                self_attention=last_attention,
-                                                                no_position_embedding=args.sa_no_position_embedding)
-            else:
-                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                                add_layer_norm=args.sa_add_layer_norm,
-                                                                add_residual=args.sa_add_residual,
-                                                                no_position_embedding=args.sa_no_position_embedding)
-            if not args.sa_no_position_embedding and args.share_position_weight:
+                                                                add_relu=args.add_relu, add_weight=args.add_weight)
+
+            if args.share_position_weight:
                 self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         diag_attn_hidden_dim = int(args.diag_attn_hidden_scale * self.bert_output_dim)
@@ -225,8 +210,6 @@ class BeliefTracker(nn.Module):
         self.save_gate = args.save_gate
         if args.save_gate:
             self.gate_metric = []
-            self.value_scores = []
-            self.graph_scores = []
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -347,8 +330,6 @@ class BeliefTracker(nn.Module):
         # Value supervision
         masked_value_scores = layers.masked_log_softmax_fp16(value_scores, value_mask, dim=-1)
         masked_value_scores = masked_value_scores.view(slot_dim, ds, ts, -1)
-        if self.save_gate and not self.training:
-            self.value_scores.append(torch.softmax(masked_value_scores, dim=-1).detach().cpu().float())
 
         # Construct graph
         hidden = hidden.view(slot_dim, ds, ts, -1)
@@ -370,9 +351,6 @@ class BeliefTracker(nn.Module):
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
         if self.diag_attn_act:
             graph_hidden = self.graph_act(graph_hidden)
-
-        if self.save_gate and not self.training:
-            self.graph_scores.append(torch.softmax(graph_scores.view(ds, ts - 1, slot_dim, -1), dim=-1).detach().cpu())
 
         # Fusion
         if self.fuse_type == 0:
@@ -531,16 +509,3 @@ class BeliefTracker(nn.Module):
         if reset:
             self.gate_metric.clear()
         return metric
-
-    def get_value_scores(self, reset=False):
-        value_scores = torch.cat(self.value_scores, dim=1)
-        value_scores = value_scores.max(dim=-1)
-        if reset:
-            self.value_scores.clear()
-        return value_scores
-
-    def get_graph_scores(self, reset=False):
-        graph_scores = torch.cat(self.graph_scores, dim=0)
-        if reset:
-            self.graph_scores.clear()
-        return graph_scores

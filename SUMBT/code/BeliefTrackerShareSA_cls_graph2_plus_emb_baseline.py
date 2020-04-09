@@ -135,12 +135,7 @@ class BeliefTracker(nn.Module):
         logger.info(f'If mask self during graph attention: {self.mask_self}')
         self.inter_domain = args.inter_domain
         logger.info(f'If do inter-domain graph attention: {self.inter_domain}')
-        self.key_add_value = args.key_add_value
-        logger.info(f'Slot attention key add value: {self.key_add_value}')
-        self.key_add_value_pro = args.key_add_value_pro
-        logger.info(f'Slot attention key add value with projection: {self.key_add_value_pro}')
-        if self.key_add_value_pro:
-            self.key_value_project = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+
         self.graph_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob,
                                                         act_fn=ACT2FN[args.diag_attn_act_fn])
         if self.diag_attn_act is not None:
@@ -225,8 +220,6 @@ class BeliefTracker(nn.Module):
         self.save_gate = args.save_gate
         if args.save_gate:
             self.gate_metric = []
-            self.value_scores = []
-            self.graph_scores = []
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -316,6 +309,13 @@ class BeliefTracker(nn.Module):
                                                       attention_mask.view(-1, self.max_seq_length),
                                                       output_all_encoded_layers=False)
 
+        # Domain-slot embedding
+        slot_emb, _, _ = self.utterance_encoder(self.slot_ids,
+                                                token_type_ids=self.slot_token_type_ids if self.slot_token_type_ids is not None else None,
+                                                attention_mask=self.slot_mask,
+                                                output_all_encoded_layers=False)
+        slot_emb = slot_emb[:, 0]
+
         # Domain-slot encoding
         slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
         slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
@@ -347,32 +347,19 @@ class BeliefTracker(nn.Module):
         # Value supervision
         masked_value_scores = layers.masked_log_softmax_fp16(value_scores, value_mask, dim=-1)
         masked_value_scores = masked_value_scores.view(slot_dim, ds, ts, -1)
-        if self.save_gate and not self.training:
-            self.value_scores.append(torch.softmax(masked_value_scores, dim=-1).detach().cpu().float())
 
         # Construct graph
         hidden = hidden.view(slot_dim, ds, ts, -1)
         graph_value = value_hidden.view(slot_dim, ds, ts, -1)[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
         graph_query = hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
-        graph_key = hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        # graph_key = hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        graph_key = slot_emb.unsqueeze(0).expand_as(graph_query) + graph_value
 
-        if self.key_add_value:
-            if self.key_add_value_pro:
-                graph_key = self.key_value_project(torch.cat([graph_key, graph_value], dim=-1))
-            else:
-                graph_key = graph_key + graph_value
-
-        # graph_mask = graph_key.new_zeros(graph_key.size()[:-1])[:, None, None, :]
-        # if self.inter_domain:
-        #     graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
         graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=None,
                                                           drop_diagonal=self.mask_self, return_scores=True)
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
         if self.diag_attn_act:
             graph_hidden = self.graph_act(graph_hidden)
-
-        if self.save_gate and not self.training:
-            self.graph_scores.append(torch.softmax(graph_scores.view(ds, ts - 1, slot_dim, -1), dim=-1).detach().cpu())
 
         # Fusion
         if self.fuse_type == 0:
@@ -531,16 +518,3 @@ class BeliefTracker(nn.Module):
         if reset:
             self.gate_metric.clear()
         return metric
-
-    def get_value_scores(self, reset=False):
-        value_scores = torch.cat(self.value_scores, dim=1)
-        value_scores = value_scores.max(dim=-1)
-        if reset:
-            self.value_scores.clear()
-        return value_scores
-
-    def get_graph_scores(self, reset=False):
-        graph_scores = torch.cat(self.graph_scores, dim=0)
-        if reset:
-            self.graph_scores.clear()
-        return graph_scores
