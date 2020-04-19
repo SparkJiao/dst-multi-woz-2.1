@@ -141,15 +141,8 @@ class BeliefTracker(nn.Module):
         logger.info(f'Slot attention key add value with projection: {self.key_add_value_pro}')
         if self.key_add_value_pro:
             self.key_value_project = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
-        logger.info(f'Graph attention type: {args.graph_attn_type}')
-        self.graph_attn_type = args.graph_attn_type
-        if self.graph_attn_type == 0:
-            self.graph_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob,
-                                                            act_fn=ACT2FN[args.diag_attn_act_fn])
-        elif self.graph_attn_type == 1:
-            nbt_config.num_attention_heads = args.graph_attn_head
-            self.graph_attention = layers.Attention(nbt_config, add_output=False, use_residual=False, add_layer_norm=False)
-
+        self.graph_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob,
+                                                        act_fn=ACT2FN[args.diag_attn_act_fn])
         if self.diag_attn_act is not None:
             self.graph_act = layers.MLP(self.bert_output_dim, self.bert_output_dim, self.diag_attn_act)
 
@@ -359,32 +352,23 @@ class BeliefTracker(nn.Module):
 
         # Construct graph
         hidden = hidden.view(slot_dim, ds, ts, -1)
-        graph_value = value_hidden.view(slot_dim, ds, ts, -1)[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
+        # graph_value = value_hidden.view(slot_dim, ds, ts, -1)[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
         graph_query = hidden[:, :, 1:].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
         graph_key = hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
 
-        if self.key_add_value:
-            if self.key_add_value_pro:
-                graph_key = self.key_value_project(torch.cat([graph_key, graph_value], dim=-1))
-            else:
-                graph_key = graph_key + graph_value
+        # if self.key_add_value:
+        #     if self.key_add_value_pro:
+        #         graph_key = self.key_value_project(torch.cat([graph_key, graph_value], dim=-1))
+        #     else:
+        #         graph_key = graph_key + graph_value
 
         # graph_mask = graph_key.new_zeros(graph_key.size()[:-1])[:, None, None, :]
         # if self.inter_domain:
         #     graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
-        if self.graph_attn_type == 0:
-            graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=None,
-                                                              drop_diagonal=self.mask_self, return_scores=True)
-        elif self.graph_attn_type == 1:
-            graph_mask = graph_query.new_zeros(graph_query.size()[:-1])[:, None, None, :]
-            if self.mask_self:
-                diag_mask = torch.diag(graph_query.new_ones(slot_dim), diagonal=0).unsqueeze(0) * -10000.0
-                graph_mask = graph_mask + diag_mask
-            graph_hidden, (_, _, _, graph_scores) = self.graph_attention(graph_query, graph_key, graph_value,
-                                                                         attention_mask=graph_mask)
-        else:
-            raise RuntimeError()
-
+        # graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=None,
+        #                                                   drop_diagonal=self.mask_self, return_scores=True)
+        graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x2_mask=None,
+                                                          drop_diagonal=self.mask_self, return_scores=True)
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
         if self.diag_attn_act:
             graph_hidden = self.graph_act(graph_hidden)

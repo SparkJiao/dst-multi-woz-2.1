@@ -132,6 +132,16 @@ class Processor(DataProcessor):
                     if key != config.target_slot:
                         target_slot.append(value)
                 config.target_slot = ':'.join(target_slot)
+            elif not config.train_single == 'all':
+                slot_idx = {'attraction': '0:1:2', 'hotel': '3:4:5:6:7:8:9:10:11:12',
+                            'restaurant': '13:14:15:16:17:18:19', 'taxi': '20:21:22:23', 'train': '24:25:26:27:28:29'}
+                # target_slot = []
+                for key, value in slot_idx.items():
+                    if key == config.train_single:
+                        # target_slot.append(value)
+                        config.target_slot = value
+                        break
+                # config.target_slot = ':'.join(target_slot)
 
         else:
             raise NotImplementedError()
@@ -142,7 +152,7 @@ class Processor(DataProcessor):
         # select slots to train
         nslots = len(ontology.keys())
         target_slot = list(ontology.keys())
-        if config.target_slot == 'all':
+        if config.target_slot == 'all' and config.train_single == 'all':
             self.target_slot_idx = [*range(0, nslots)]
         else:
             self.target_slot_idx = sorted([int(x) for x in config.target_slot.split(':')])
@@ -497,6 +507,7 @@ def main():
                         type=str,
                         required=True,
                         help="Target slot idx to train model. ex. 'all', '0:1:2', or an excluding slot name 'attraction'")
+    parser.add_argument('--train_single', default='all', type=str)
     parser.add_argument("--tf_dir",
                         default='tensorboard',
                         type=str,
@@ -712,6 +723,7 @@ def main():
     parser.add_argument('--add_weight', default=False, action='store_true')
     parser.add_argument('--num_layers', default=0, type=int)
     parser.add_argument('--hop_update_self', default=False, action='store_true')
+    parser.add_argument('--graph_attn_type', default=0, type=int)
 
     args = parser.parse_args()
 
@@ -941,6 +953,8 @@ def main():
         from BeliefTrackerShareSA_cls_graph2_plus_test import BeliefTracker
     elif args.nbt == 'graph2_p_emb_baseline':
         from BeliefTrackerShareSA_cls_graph2_plus_emb_baseline import BeliefTracker
+    elif args.nbt == 'graph2_p_latent_baseline':
+        from BeliefTrackerShareSA_cls_graph2_plus_latent_baseline import BeliefTracker
     elif args.nbt == 'graph2p_multi_hop':
         from BeliefTrackerShareSA_cls_graph2p_multi_hop import BeliefTracker
     elif args.nbt == 'graph2_pp':
@@ -1506,55 +1520,62 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
         slot_acc_type = torch.sum(answer_type_accuracy).float()
         return joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data
 
-    # restaurant domain
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 13:20], pred_slot[:, :, 13:20], answer_type_ids[:, :, 13:20], labels[:, :, 13:20])
-    accuracies['num_turn'] += num_turn
-    accuracies['joint_rest'] += joint_acc
-    accuracies['joint_type_rest'] += joint_acc_type
-    accuracies['slot_rest'] += slot_acc
-    accuracies['slot_type_rest'] += slot_acc_type
-    accuracies['num_slot_rest'] += num_data
+    if labels.size(-1) == 30:  # Full slots
+        # restaurant domain
+        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
+            answer_type_pred[:, :, 13:20], pred_slot[:, :, 13:20], answer_type_ids[:, :, 13:20], labels[:, :, 13:20])
+        accuracies['joint_rest'] += joint_acc
+        accuracies['joint_type_rest'] += joint_acc_type
+        accuracies['slot_rest'] += slot_acc
+        accuracies['slot_type_rest'] += slot_acc_type
+        accuracies['num_slot_rest'] += num_data
 
-    # taxi domain
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 20:24], pred_slot[:, :, 20:24], answer_type_ids[:, :, 20:24], labels[:, :, 20:24])
-    accuracies['joint_taxi'] += joint_acc
-    accuracies['joint_type_taxi'] += joint_acc_type
-    accuracies['slot_taxi'] += slot_acc
-    accuracies['slot_type_taxi'] += slot_acc_type
-    accuracies['num_slot_taxi'] += num_data
+        # taxi domain
+        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
+            answer_type_pred[:, :, 20:24], pred_slot[:, :, 20:24], answer_type_ids[:, :, 20:24], labels[:, :, 20:24])
+        accuracies['joint_taxi'] += joint_acc
+        accuracies['joint_type_taxi'] += joint_acc_type
+        accuracies['slot_taxi'] += slot_acc
+        accuracies['slot_type_taxi'] += slot_acc_type
+        accuracies['num_slot_taxi'] += num_data
 
-    # attraction
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 0:3], pred_slot[:, :, 0:3], answer_type_ids[:, :, 0:3], labels[:, :, 0:3])
-    accuracies['joint_attraction'] += joint_acc
-    accuracies['joint_type_attraction'] += joint_acc_type
-    accuracies['slot_attraction'] += slot_acc
-    accuracies['slot_type_attraction'] += slot_acc_type
-    accuracies['num_slot_attraction'] += num_data
+        # attraction
+        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
+            answer_type_pred[:, :, 0:3], pred_slot[:, :, 0:3], answer_type_ids[:, :, 0:3], labels[:, :, 0:3])
+        accuracies['joint_attraction'] += joint_acc
+        accuracies['joint_type_attraction'] += joint_acc_type
+        accuracies['slot_attraction'] += slot_acc
+        accuracies['slot_type_attraction'] += slot_acc_type
+        accuracies['num_slot_attraction'] += num_data
 
-    # hotel
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 3:13], pred_slot[:, :, 3:13], answer_type_ids[:, :, 3:13], labels[:, :, 3:13])
-    accuracies['joint_hotel'] += joint_acc
-    accuracies['joint_type_hotel'] += joint_acc_type
-    accuracies['slot_hotel'] += slot_acc
-    accuracies['slot_type_hotel'] += slot_acc_type
-    accuracies['num_slot_hotel'] += num_data
+        # hotel
+        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
+            answer_type_pred[:, :, 3:13], pred_slot[:, :, 3:13], answer_type_ids[:, :, 3:13], labels[:, :, 3:13])
+        accuracies['joint_hotel'] += joint_acc
+        accuracies['joint_type_hotel'] += joint_acc_type
+        accuracies['slot_hotel'] += slot_acc
+        accuracies['slot_type_hotel'] += slot_acc_type
+        accuracies['num_slot_hotel'] += num_data
 
-    # train
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred[:, :, 24:], pred_slot[:, :, 24:], answer_type_ids[:, :, 24:], labels[:, :, 24:])
-    accuracies['joint_train'] += joint_acc
-    accuracies['joint_type_train'] += joint_acc_type
-    accuracies['slot_train'] += slot_acc
-    accuracies['slot_type_train'] += slot_acc_type
-    accuracies['num_slot_train'] += num_data
+        # train
+        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
+            answer_type_pred[:, :, 24:], pred_slot[:, :, 24:], answer_type_ids[:, :, 24:], labels[:, :, 24:])
+        accuracies['joint_train'] += joint_acc
+        accuracies['joint_type_train'] += joint_acc_type
+        accuracies['slot_train'] += slot_acc
+        accuracies['slot_type_train'] += slot_acc_type
+        accuracies['num_slot_train'] += num_data
+    else:
+        accuracies['num_slot_rest'] = torch.tensor(1)
+        accuracies['num_slot_taxi'] = torch.tensor(1)
+        accuracies['num_slot_attraction'] = torch.tensor(1)
+        accuracies['num_slot_hotel'] = torch.tensor(1)
+        accuracies['num_slot_train'] = torch.tensor(1)
 
     # 5 domains (excluding bus and hotel domain)
     joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
         answer_type_pred, pred_slot, answer_type_ids, labels)
+    accuracies['num_turn'] += num_turn
     accuracies['joint5'] += joint_acc
     accuracies['joint_type5'] += joint_acc_type
     accuracies['slot5'] += slot_acc

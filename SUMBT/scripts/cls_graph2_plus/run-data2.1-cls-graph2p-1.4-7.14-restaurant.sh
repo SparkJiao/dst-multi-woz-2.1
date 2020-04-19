@@ -35,4 +35,4 @@ python code/main-multislot-share-5-newcls.py --do_eval --num_train_epochs 5 --da
 --test_file data/multiwoz2.1_5/test-5-full-value.tsv \
 --ontology data/multiwoz2.1_5/ontology-full.json \
 --cls_type 0 --extra_nbt --graph_value_sup 1.0 --attn_head 12 --extra_nbt_attn_head 12 --diag_attn_hidden_scale 1.0 \
---max_loss_scale 256 --value_embedding_type mean --sa_add_layer_norm
+--max_loss_scale 256 --value_embedding_type mean --sa_add_layer_norm --train_single restaurant

@@ -123,6 +123,16 @@ class BeliefTracker(nn.Module):
             if not args.sa_no_position_embedding and args.share_position_weight:
                 self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
+        diag_attn_hidden_dim = int(args.diag_attn_hidden_scale * self.bert_output_dim)
+        logger.info(f'Diagonal attention hidden size: {diag_attn_hidden_dim}')
+        self.diag_attn_act = args.diag_attn_act
+        self.value_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob,
+                                                        act_fn=ACT2FN[args.diag_attn_act_fn])
+        if self.diag_attn_act is not None:
+            self.value_act = layers.MLP(self.bert_output_dim, self.bert_output_dim, self.diag_attn_act)
+
+        self.mask_self = args.mask_self
+        logger.info(f'If mask self during graph attention: {self.mask_self}')
         self.inter_domain = args.inter_domain
 
         if args.cls_type == 0:
@@ -146,6 +156,12 @@ class BeliefTracker(nn.Module):
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
         logger.info(f'Classification loss weight: {args.cls_loss_weight}')
         self.cls_loss_weight = args.cls_loss_weight
+        logger.info(f"Graph scores supervision coherent: {args.graph_add_sup}")
+        self.graph_add_sup = args.graph_add_sup
+        logger.info(f"Graph value scores supervision coherent: {args.graph_value_sup}")
+        self.graph_value_sup = args.graph_value_sup
+        logger.info(f"Transfer labels supervision coherent: {args.transfer_sup}")
+        self.transfer_sup = args.transfer_sup
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
@@ -161,6 +177,26 @@ class BeliefTracker(nn.Module):
                 "eval": Average(),
             }
         }
+        # if self.graph_add_sup > 0:
+        #     self.metrics["slot_negative_loss"] = {
+        #         "train": Average(),
+        #         "eval": Average()
+        #     }
+        if self.graph_value_sup > 0:
+            self.metrics["graph_value_loss"] = {
+                "train": Average(),
+                "eval": Average()
+            }
+        # if self.transfer_sup > 0:
+        #     self.metrics["transfer_loss"] = {
+        #         "train": Average()
+        #     }
+
+        self.save_gate = args.save_gate
+        if args.save_gate:
+            self.gate_metric = []
+            self.value_scores = []
+            self.graph_scores = []
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -270,6 +306,20 @@ class BeliefTracker(nn.Module):
         # Neural belief tracking
         hidden = self.transformer(hidden, None).view(slot_dim * bs, -1)
 
+        # Value attention
+        value_mask = self.value_mask
+        value_tensor = self.defined_values
+        value_hidden, value_scores = self.value_attention(hidden.view(slot_dim, bs, -1),
+                                                          value_tensor, x3=value_tensor, x2_mask=value_mask, return_scores=True)
+        if self.diag_attn_act:
+            value_hidden = self.value_act(value_hidden)
+
+        # Value supervision
+        masked_value_scores = layers.masked_log_softmax_fp16(value_scores, value_mask, dim=-1)
+        masked_value_scores = masked_value_scores.view(slot_dim, ds, ts, -1)
+        if self.save_gate and not self.training:
+            self.value_scores.append(torch.softmax(masked_value_scores, dim=-1).detach().cpu().float())
+
         loss = 0
         # Extra neural belief tracking
         if self.extra_nbt:
@@ -287,6 +337,7 @@ class BeliefTracker(nn.Module):
         output = []
         type_loss = 0.
         matching_loss = 0.
+        graph_loss = 0.
         for s, slot_id in enumerate(target_slot):  # note: target_slots are successive
             # loss calculation
             hid_label = self.value_lookup[slot_id].weight
@@ -318,6 +369,14 @@ class BeliefTracker(nn.Module):
                 matching_loss += _loss.item()
                 loss += _loss
 
+                if self.graph_value_sup > 0:
+                    graph_value_loss = nn.functional.nll_loss(masked_value_scores[s].view(bs, -1),
+                                                              masked_slot_labels_for_loss.view(-1), ignore_index=-1,
+                                                              reduction='sum') / ds
+                    graph_value_loss = self.graph_value_sup * graph_value_loss
+                    loss += graph_value_loss
+                    graph_loss += graph_value_loss.item()
+
             if answer_type_ids is not None:
                 cls_loss = self.nll(answer_type_logits[s].view(ds * ts, -1), answer_type_ids[:, :, s].view(-1)) / ds
                 loss_slot[-1] += cls_loss.item()
@@ -330,6 +389,8 @@ class BeliefTracker(nn.Module):
 
         self.update_metric("cls_loss", type_loss)
         self.update_metric("matching_loss", matching_loss)
+        if self.graph_value_sup > 0:
+            self.update_metric("graph_value_loss", graph_loss)
 
         # calculate joint accuracy
         pred_slot = torch.cat(pred_slot, 2)  # (ds, ts, slot_dim)
@@ -380,5 +441,6 @@ class BeliefTracker(nn.Module):
         state = 'train' if self.training else 'eval'
         metrics = {}
         for k, v in self.metrics.items():
-            metrics[k] = v[state].get_metric(reset=reset)
+            if state in v:
+                metrics[k] = v[state].get_metric(reset=reset)
         return metrics
