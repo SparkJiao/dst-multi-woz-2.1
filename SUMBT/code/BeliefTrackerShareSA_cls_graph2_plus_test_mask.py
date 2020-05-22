@@ -10,11 +10,11 @@ from torch.nn import functional as F
 
 try:
     from . import layers
-    from .modeling_bert_extended_f import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention, BertIntermediate
+    from .modeling_bert_extended_f import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from .global_logger import get_child_logger
 except ImportError:
     import layers
-    from modeling_bert_extended_f import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention, BertIntermediate
+    from modeling_bert_extended_f import BertModel, SimpleDialogSelfAttention, SimpleSelfAttention
     from global_logger import get_child_logger
 
 logger: Logger = get_child_logger(__name__)
@@ -86,47 +86,48 @@ class BeliefTracker(nn.Module):
         nbt_config = self.sv_encoder.config
         nbt_config.num_attention_heads = self.attn_head
         nbt_config.hidden_dropout_prob = self.hidden_dropout_prob
-        # nbt_config.intermediate_size = args.ffn_intermediate_size
         logger.info(f"Dialog Self Attention add layer norm: {args.sa_add_layer_norm}")
         logger.info(f"Dialog Self Attention add residual: {args.sa_add_residual}")
-        # last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
-
-        self.sa_fuse_type = args.sa_fuse_type
-        logger.info(f'Dialog Self Attention Fuse Type: {self.sa_fuse_type}')
-
-        self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                     add_layer_norm=args.sa_add_layer_norm,
-                                                     add_residual=args.sa_add_residual)
-        self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
-        if self.sa_fuse_type == 'gate':
-            self.transformer_fuse = layers.DynamicFusionDropout(self.bert_output_dim, act_fn=ACT2FN[args.fusion_act_fn],
-                                                                gate_type=0, no_transform=True, dropout=self.hidden_dropout_prob)
-        elif self.sa_fuse_type == 'simple':
-            self.transformer_fuse = layers.SimpleFusion(self.bert_output_dim * 2, self.bert_output_dim,
-                                                        add_layer_norm=args.fuse_add_layer_norm, dropout=self.hidden_dropout_prob)
-        elif self.sa_fuse_type == 'transformer':
-            self.transformer_fuse = layers.BertFFN(nbt_config)
+        last_attention = self.utterance_encoder.bert.encoder.layer[-1].attention.self
+        if args.override_attn:
+            logger.info("Override self attention from last layer of BERT")
+            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                         add_layer_norm=args.sa_add_layer_norm,
+                                                         add_residual=args.sa_add_residual,
+                                                         self_attention=last_attention)
         else:
-            raise RuntimeError()
+            self.transformer = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                         add_layer_norm=args.sa_add_layer_norm,
+                                                         add_residual=args.sa_add_residual)
+        if args.share_position_weight:
+            logger.info("Dialog self attention will share position embeddings with BERT")
+            self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
 
         logger.info(f"If extra neural belief tracker: {args.extra_nbt}")
         self.extra_nbt = args.extra_nbt
         if self.extra_nbt:
             nbt_config.num_attention_heads = args.extra_nbt_attn_head
-            self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
-                                                            add_layer_norm=args.sa_add_layer_norm,
-                                                            add_residual=args.sa_add_residual)
-            self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
-            if self.sa_fuse_type == 'gate':
-                self.belief_tracker_fuse = layers.DynamicFusionDropout(self.bert_output_dim, act_fn=ACT2FN[args.fusion_act_fn],
-                                                                       gate_type=0, no_transform=True, dropout=self.hidden_dropout_prob)
-            elif self.sa_fuse_type == 'simple':
-                self.belief_tracker_fuse = layers.SimpleFusion(self.bert_output_dim * 2, self.bert_output_dim,
-                                                               add_layer_norm=args.fuse_add_layer_norm, dropout=self.hidden_dropout_prob)
-            elif self.sa_fuse_type == 'transformer':
-                self.belief_tracker_fuse = layers.BertFFN(nbt_config)
+            self.override_attn_extra = args.override_attn_extra
+            logger.info(f'If override self attention from last layer of BERT for extra belief tracker: {self.override_attn_extra}')
+            if self.override_attn_extra:
+                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                                add_layer_norm=args.sa_add_layer_norm,
+                                                                add_residual=args.sa_add_residual,
+                                                                self_attention=last_attention,
+                                                                no_position_embedding=args.sa_no_position_embedding)
             else:
-                raise RuntimeError()
+                self.belief_tracker = SimpleDialogSelfAttention(nbt_config, add_output=True,
+                                                                add_layer_norm=args.sa_add_layer_norm,
+                                                                add_residual=args.sa_add_residual,
+                                                                no_position_embedding=args.sa_no_position_embedding)
+            if not args.sa_no_position_embedding and args.share_position_weight:
+                self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
+
+        self.sa_act_1 = args.sa_act_1
+        logger.info(f'Dialog self attention use activation: {self.sa_act_1}')
+        if args.sa_act_1 is not None:
+            self.tf_act = layers.ActLayer(self.bert_output_dim, self.bert_output_dim, act_fn=ACT2FN[self.sa_act_1],
+                                          dropout=self.hidden_dropout_prob)
 
         diag_attn_hidden_dim = int(args.diag_attn_hidden_scale * self.bert_output_dim)
         logger.info(f'Diagonal attention hidden size: {diag_attn_hidden_dim}')
@@ -146,6 +147,13 @@ class BeliefTracker(nn.Module):
         logger.info(f'Slot attention key add value with projection: {self.key_add_value_pro}')
         if self.key_add_value_pro:
             self.key_value_project = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+
+        # Test
+        self.mask_top_k = args.mask_top_k
+        logger.info(f'Mask top k slot attention scores: {self.mask_top_k}')
+        self.test_mode = args.test_mode
+        logger.info(f'Test mode: {self.test_mode}')
+
         logger.info(f'Graph attention type: {args.graph_attn_type}')
         self.graph_attn_type = args.graph_attn_type
         if self.graph_attn_type == 0:
@@ -153,6 +161,7 @@ class BeliefTracker(nn.Module):
                                                             act_fn=ACT2FN[args.diag_attn_act_fn])
         elif self.graph_attn_type == 1:
             nbt_config.num_attention_heads = args.graph_attn_head
+            nbt_config.attention_probs_dropout_prob = args.graph_dropout
             self.graph_attention = layers.Attention(nbt_config, add_output=args.graph_add_output,
                                                     use_residual=args.graph_add_residual, add_layer_norm=args.graph_add_layer_norm)
 
@@ -163,7 +172,7 @@ class BeliefTracker(nn.Module):
         logger.info(f'Fuse type: {self.fuse_type}')
         if self.fuse_type == 0:
             self.graph_project = layers.DynamicFusion(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
-                                                      act_fn=ACT2FN[args.fusion_act_fn])
+                                                      act_fn=ACT2FN[args.fusion_act_fn], test_mode=self.test_mode)
         elif self.fuse_type == 1:
             self.graph_project = layers.SimpleTransform(self.bert_output_dim)
         elif self.fuse_type == 2:
@@ -171,7 +180,10 @@ class BeliefTracker(nn.Module):
                                                    act_fn=ACT2FN[args.fusion_act_fn])
         elif self.fuse_type == 3:
             self.graph_project = layers.DynamicFusionDropout(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
-                                                             act_fn=ACT2FN[args.fusion_act_fn], dropout=self.hidden_dropout_prob)
+                                                             dropout=self.hidden_dropout_prob, act_fn=ACT2FN[args.fusion_act_fn])
+        elif self.fuse_type == 4:
+            self.graph_project = layers.DynamicFusion2(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
+                                                       act_fn=ACT2FN[args.fusion_act_fn])
         else:
             raise RuntimeError()
 
@@ -266,6 +278,12 @@ class BeliefTracker(nn.Module):
             inter_domain_mask = (1 - inter_domain_mask) * -10000.0
             self.register_buffer("inter_domain_mask", inter_domain_mask)
 
+        if self.slot_res is not None:
+            slot_dim = slot_ids.size(0)
+            slot_res = torch.ones(slot_dim, slot_dim, device=self.device, dtype=torch.long)
+            slot_res[:, self.slot_res] = torch.zeros(slot_dim, len(self.slot_res), device=self.device, dtype=torch.long)
+            self.slot_res = slot_res
+
         max_value_num = 0
         value_list = []
 
@@ -350,16 +368,10 @@ class BeliefTracker(nn.Module):
         hidden = hidden[:, 0].view(slot_dim * ds, ts, -1)
 
         # Neural belief tracking
-        self_hidden = self.transformer(hidden, None)
-        if self.sa_fuse_type == 'gate':
-            hidden, _ = self.transformer_fuse(hidden, self_hidden)
-        elif self.sa_fuse_type == 'simple':
-            hidden = self.transformer_fuse(torch.cat([hidden, self_hidden], dim=-1))
-        elif self.sa_fuse_type == 'transformer':
-            hidden = self.transformer_fuse(self_hidden)
-        else:
-            raise RuntimeError()
-        hidden = hidden.view(slot_dim * bs, -1)
+        hidden = self.transformer(hidden, None).view(slot_dim * bs, -1)
+
+        if self.sa_act_1 is not None:
+            hidden = self.tf_act(hidden)
 
         # Value attention
         value_mask = self.value_mask
@@ -391,8 +403,14 @@ class BeliefTracker(nn.Module):
         # if self.inter_domain:
         #     graph_mask = self.inter_domain_mask[None, None, :, :].to(dtype=graph_mask.dtype) + graph_mask
         if self.graph_attn_type == 0:
-            graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=None,
-                                                              drop_diagonal=self.mask_self, return_scores=True)
+            if self.slot_res is not None:
+                x2_mask = self.slot_res[None, :, :]
+            else:
+                x2_mask = None
+            graph_hidden, graph_scores = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=x2_mask,
+                                                              drop_diagonal=self.mask_self, return_scores=True, mask_top_k=self.mask_top_k)
+            full_graph_hidden, _ = self.graph_attention(graph_query, graph_key, x3=graph_value, x2_mask=None,
+                                                        drop_diagonal=self.mask_self, return_scores=True)
         elif self.graph_attn_type == 1:
             graph_mask = graph_query.new_zeros(graph_query.size()[:-1])[:, None, None, :]
             if self.mask_self:
@@ -404,6 +422,7 @@ class BeliefTracker(nn.Module):
             raise RuntimeError()
 
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
+        full_graph_hidden = full_graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
         if self.diag_attn_act:
             graph_hidden = self.graph_act(graph_hidden)
 
@@ -411,16 +430,16 @@ class BeliefTracker(nn.Module):
             self.graph_scores.append(torch.softmax(graph_scores.view(ds, ts - 1, slot_dim, -1), dim=-1).detach().cpu())
 
         # Fusion
-        if self.fuse_type in [0, 3]:
-            graph_hidden, gate = self.graph_project(hidden[:, :, 1:], graph_hidden)
+        if self.fuse_type in [0, 3, 4]:
+            graph_hidden, gate = self.graph_project(hidden[:, :, 1:], graph_hidden, full_y=full_graph_hidden)
             if self.save_gate and not self.training:
                 self.gate_metric.append(gate.detach().cpu().float())
         else:
             graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
 
-        if self.slot_res is not None:
-            ini_hidden = graph_query.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
-            graph_hidden[self.slot_res, :, :, :] = ini_hidden[self.slot_res, :, :, :]
+        # if self.slot_res is not None:
+        #     ini_hidden = graph_query.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
+        #     graph_hidden[self.slot_res, :, :, :] = ini_hidden[self.slot_res, :, :, :]
 
         hidden = torch.cat([hidden[:, :, 0].unsqueeze(2), graph_hidden], dim=2)
 
@@ -441,16 +460,7 @@ class BeliefTracker(nn.Module):
         # Extra neural belief tracking
         if self.extra_nbt:
             hidden = hidden.reshape(slot_dim * ds, ts, -1)
-            self_hidden = self.belief_tracker(hidden, None)
-            if self.sa_fuse_type == 'gate':
-                hidden, _ = self.belief_tracker_fuse(hidden, self_hidden)
-            elif self.sa_fuse_type == 'simple':
-                hidden = self.belief_tracker_fuse(torch.cat([hidden, self_hidden], dim=-1))
-            elif self.sa_fuse_type == 'transformer':
-                hidden = self.belief_tracker_fuse(self_hidden)
-            else:
-                raise RuntimeError()
-            hidden = hidden.view(slot_dim, ds, ts, -1)
+            hidden = self.belief_tracker(hidden, None).view(slot_dim, ds, ts, -1)
 
         answer_type_logits = self.classifier(hidden)
         _, answer_type_pred = answer_type_logits.max(dim=-1)

@@ -2,8 +2,11 @@ import logging
 import math
 import copy
 
+import random
+
 import torch
-from pytorch_pretrained_bert.modeling import BertConfig, BertPreTrainedModel, gelu, BertSelfAttention, BertLayerNorm, ACT2FN
+from pytorch_pretrained_bert.modeling import BertConfig, BertPreTrainedModel, gelu, BertSelfAttention, BertLayerNorm, ACT2FN, \
+    BertIntermediate, BertOutput
 from torch import distributions
 from torch import nn
 from torch.nn import Parameter
@@ -184,7 +187,7 @@ class Attention(nn.Module):
 
 
 class DynamicFusion(nn.Module):
-    def __init__(self, input_size, act_fn=gelu, gate_type=0, no_transform=False):
+    def __init__(self, input_size, act_fn=gelu, gate_type=0, no_transform=False, test_mode: int = -1):
         super(DynamicFusion, self).__init__()
         self.no_transform = no_transform
         if not self.no_transform:
@@ -202,18 +205,493 @@ class DynamicFusion(nn.Module):
             raise RuntimeError()
         self.act_fn = act_fn
 
-    def forward(self, x, y):
+        # test setting
+        self.test_mode = test_mode
+        if self.test_mode >= 0:
+            self.test_forward = {
+                0: self.test_mode_0,
+                1: self.test_mode_1,
+                2: self.test_mode_2,
+                3: self.test_mode_3,
+                4: self.test_mode_4,
+                5: self.test_mode_5,
+                6: self.test_mode_6,
+                10: self.test_mode_10,
+                11: self.test_mode_11,
+                12: self.test_mode_12,
+                13: self.test_mode_13,
+                20: self.test_mode_20,
+                21: self.test_mode_21,
+                22: self.test_mode_22,
+                23: self.test_mode_23,
+                24: self.test_mode_24,
+                25: self.test_mode_25,
+                26: self.test_mode_26,
+                27: self.test_mode_27,
+                28: self.test_mode_28,
+                29: self.test_mode_29,
+                30: self.test_mode_30,
+                31: self.test_mode_31,
+                32: self.test_mode_32,
+                33: self.test_mode_33,
+                34: self.test_mode_34,
+                35: self.test_mode_35,
+                36: self.test_mode_36,
+                37: self.test_mode_37,
+            }[self.test_mode]
+
+    def forward(self, x, y, **inputs):
         """
         :param x: initial sequence
         :param y: attended sequence
         :return: fused sequence
         """
+
+        if self.test_mode >= 0:
+            return self.test_forward(x, y, **inputs)
+
         if not self.no_transform:
             y = self.act_fn(self.transform1(y))
         z = torch.cat([x, y, x - y, x * y], dim=-1)
         gate = torch.sigmoid(self.gate_f(z))
         fusion = self.act_fn(self.fuse_f(z))
         res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_0(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding] * 4, dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_1(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_2(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding, y, padding - y, padding * y], dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_3(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        # padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(z))
+        res = fusion
+        return res, gate
+
+    def test_mode_4(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding, y, x - y, padding * y], dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_5(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding, y, padding - y, x * y], dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_6(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding, y, x - y, x * y], dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_10(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, padding, padding], dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_11(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, y, padding, padding], dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_12(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        padding = y.new_zeros(y.size(), dtype=y.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, y, x - y, padding], dim=-1)))
+        res = fusion
+        return res, gate
+
+    def test_mode_13(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        # gate = (gate > 0.5).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_20(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.4).to(dtype=gate.dtype)
+        fusion = self.act_fn(self.fuse_f(z))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        # fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_21(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.5).to(dtype=gate.dtype)
+        fusion = self.act_fn(self.fuse_f(z))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        # fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_22(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.6).to(dtype=gate.dtype)
+        fusion = self.act_fn(self.fuse_f(z))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        # fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_23(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.4).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        padding = y.new_zeros(y.size())
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_24(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.5).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        padding = y.new_zeros(y.size())
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_25(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.6).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        padding = y.new_zeros(y.size())
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_26(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        padding = y.new_zeros(y.size())
+        z = torch.cat([x, padding, x - padding, x * padding], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.4).to(dtype=gate.dtype)
+        fusion = self.act_fn(self.fuse_f(z))
+        # fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_27(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        padding = y.new_zeros(y.size())
+        z = torch.cat([x, padding, x - padding, x * padding], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.5).to(dtype=gate.dtype)
+        fusion = self.act_fn(self.fuse_f(z))
+        # fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_28(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        padding = y.new_zeros(y.size())
+        z = torch.cat([x, padding, x - padding, x * padding], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.6).to(dtype=gate.dtype)
+        fusion = self.act_fn(self.fuse_f(z))
+        # fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_29(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        index = list(range(30))
+        random.shuffle(index)
+        padding = y[index]
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        # gate = (gate > 0.5).to(dtype=gate.dtype)
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        # fusion = self.act_fn(self.fuse_f(torch.cat([x, padding, x - padding, x * padding], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_30(self, x, y, full_y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+            full_y = self.act_fn(self.transform1(full_y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        z = torch.cat([x, full_y, x - full_y, x * full_y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        # gate = (gate > 0.6).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, y, x - y, x * y], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_31(self, x, y, full_y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+            full_y = self.act_fn(self.transform1(full_y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        z = torch.cat([x, full_y, x - full_y, x * full_y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.4).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, y, x - y, x * y], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_32(self, x, y, full_y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+            full_y = self.act_fn(self.transform1(full_y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        z = torch.cat([x, full_y, x - full_y, x * full_y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.5).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, y, x - y, x * y], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_33(self, x, y, full_y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+            full_y = self.act_fn(self.transform1(full_y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        z = torch.cat([x, full_y, x - full_y, x * full_y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.6).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        fusion = self.act_fn(self.fuse_f(torch.cat([x, y, x - y, x * y], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_34(self, x, y, full_y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+            full_y = self.act_fn(self.transform1(full_y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        z = torch.cat([x, full_y, x - full_y, x * full_y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.5).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        padding = x.new_zeros(x.size())
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding, y, padding - y, padding * y], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_35(self, x, y, full_y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+            full_y = self.act_fn(self.transform1(full_y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        z = torch.cat([x, full_y, x - full_y, x * full_y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.6).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        padding = x.new_zeros(x.size())
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding, y, padding - y, padding * y], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_36(self, x, y, full_y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+            full_y = self.act_fn(self.transform1(full_y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        z = torch.cat([x, full_y, x - full_y, x * full_y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.4).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        padding = x.new_zeros(x.size())
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding, y, padding - y, padding * y], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_mode_37(self, x, y, full_y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+            full_y = self.act_fn(self.transform1(full_y))
+        # padding = torch.randn(y.size(), dtype=y.dtype, device=y.device)
+        z = torch.cat([x, full_y, x - full_y, x * full_y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        gate = (gate > 0.5).to(dtype=gate.dtype)
+        # fusion = self.act_fn(self.fuse_f(z))
+        padding = x.new_zeros(x.size())
+        fusion = self.act_fn(self.fuse_f(torch.cat([padding, full_y, padding - full_y, padding * full_y], dim=-1)))
+        res = gate * fusion + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+
+class DynamicFusion2(nn.Module):
+    def __init__(self, input_size, act_fn=gelu, gate_type=0, no_transform=False, test_mode=-1):
+        super(DynamicFusion2, self).__init__()
+        self.no_transform = no_transform
+        if not self.no_transform:
+            self.transform1 = nn.Linear(input_size, input_size)
+        # self.fuse_f = nn.Linear(input_size * 4, input_size)
+        logger.info(f'{self.__class__.__name__} parameters:\n'
+                    f'Gate type: {gate_type}\n'
+                    f'No transform before fusion: {no_transform}\n'
+                    f'Activation function: {act_fn}')
+        if gate_type == 0:
+            self.gate_f = nn.Linear(input_size * 4, input_size)
+        elif gate_type == 1:
+            self.gate_f = nn.Linear(input_size * 4, 1)
+        else:
+            raise RuntimeError()
+        self.act_fn = act_fn
+
+        self.test_mode = test_mode
+        if self.test_mode >= 0:
+            self.test_forward = {
+                0: self.test_forward_0,
+                1: self.test_forward_1,
+            }[self.test_mode]
+
+    def forward(self, x, y):
+        """
+        :param x: initial sequence
+        :param y: attended sequence
+        :return: fused sequence
+        """
+
+        if self.test_mode >= 0:
+            return self.test_forward(x, y)
+
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        # fusion = self.act_fn(self.fuse_f(z))
+        res = gate * y + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        return res, gate
+
+    def test_forward_0(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        # fusion = self.act_fn(self.fuse_f(z))
+        # res = gate * y + (1 - gate) * x
+        # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
+        res = y
+        return res, gate
+
+    def test_forward_1(self, x, y):
+        if not self.no_transform:
+            y = self.act_fn(self.transform1(y))
+        z = torch.cat([x, y, x - y, x * y], dim=-1)
+        gate = torch.sigmoid(self.gate_f(z))
+        # fusion = self.act_fn(self.fuse_f(z))
+        gate = (gate > 0.5).to(dtype=gate.dtype)
+        res = gate * y + (1 - gate) * x
         # return res, gate.detach().mean(dim=0).mean(dim=-1).cpu()
         return res, gate
 
@@ -709,11 +1187,19 @@ class DiagonalAttention(nn.Module):
         super(DiagonalAttention, self).__init__()
         self.scoring = DiagonalAttentionScore(input_size, hidden_size, dropout=dropout, do_similarity=do_similarity, act_fn=act_fn)
 
-    def forward(self, x1, x2, x2_mask=None, x3=None, drop_diagonal=False, return_scores=False):
+    def forward(self, x1, x2, x2_mask=None, x3=None, drop_diagonal=False, return_scores=False, mask_top_k=0):
         if x3 is None:
             x3 = x2
 
         scores = self.scoring(x1, x2)
+
+        # if mask_top_k > 0:
+        #     for i in range(mask_top_k):
+        #         _, max_index = scores.max(dim=-1)
+        #         # print(max_index[0])
+        #         max_index_one_hot = F.one_hot(max_index, num_classes=scores.size(-1))
+        #         scores.masked_fill_(max_index_one_hot.to(dtype=torch.uint8), -10000.0)
+        #         # print(scores[0])
 
         if x2_mask is None:
             x2_mask = x2.new_ones((x2.size(0), 1, x2.size(1)), dtype=torch.long)
@@ -729,8 +1215,14 @@ class DiagonalAttention(nn.Module):
         x2_mask = x2_mask.to(dtype=x2.dtype)
         x2_mask = (1.0 - x2_mask) * -10000.0
         masked_scores = scores + x2_mask
+        # print(masked_scores[0])
 
         alpha = torch.softmax(masked_scores, dim=-1)
+        if mask_top_k > 0:
+            # alpha = 1 - alpha
+            # alpha = torch.softmax(1 - alpha, dim=-1)
+            alpha = torch.softmax(torch.randn(alpha.size(), dtype=alpha.dtype, device=alpha.device), dim=-1)
+        # print(alpha[0])
         res = alpha.bmm(x3)
 
         if return_scores:
@@ -763,6 +1255,20 @@ class FeedForwardNetwork(nn.Module):
             h = self.LayerNorm(h)
 
         return h
+
+
+class BertFFN(BertPreTrainedModel):
+    def __init__(self, config):
+        super(BertFFN, self).__init__(config)
+        self.intermediate = BertIntermediate(config)
+        self.output = BertOutput(config)
+        self.config = config
+        self.apply(self.init_bert_weights)
+
+    def forward(self, attention_output):
+        intermediate_output = self.intermediate(attention_output)
+        layer_output = self.output(intermediate_output, attention_output)
+        return layer_output
 
 
 class StackedGraphLayer(nn.Module):
@@ -811,7 +1317,7 @@ class StackedGraphLayer(nn.Module):
             graph_key = flat_hidden[:, :, :-1].permute(1, 2, 0, 3).reshape(ds * (ts - 1), slot_dim, -1)
 
             graph_hidden, graph_score = self.graph_attention_layers[i](graph_query, graph_key, x3=graph_value, x2_mask=None,
-                                                                        return_scores=True, drop_diagonal=mask_self)
+                                                                       return_scores=True, drop_diagonal=mask_self)
             graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
             graph_scores.append(graph_score)
 
@@ -840,6 +1346,37 @@ class MLP(nn.Module):
         if self.act_fn is not None:
             flat_x = self.act_fn(flat_x)
         return flat_x.view(x.size()[:-1] + (self.output_dim,))
+
+
+class ActLayer(nn.Module):
+    def __init__(self, input_dim, output_dim, act_fn=gelu, dropout=0.1, use_residual=False, use_layer_norm=False):
+        super(ActLayer, self).__init__()
+        self.act_fn = act_fn
+        self.linear = nn.Linear(input_dim, output_dim)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x):
+        h = self.dropout(self.linear(self.act_fn(x)))
+        return h
+
+
+class SimpleFusion(nn.Module):
+    def __init__(self, input_dim, output_dim, act_fn=gelu, add_layer_norm=False, dropout=0.2):
+        super(SimpleFusion, self).__init__()
+        self.linear1 = nn.Linear(input_dim, input_dim)
+        self.linear2 = nn.Linear(input_dim, output_dim)
+        self.act_fn = act_fn
+        self.add_layer_norm = add_layer_norm
+        if self.add_layer_norm:
+            self.LayerNorm = nn.LayerNorm(output_dim, eps=1e-12)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x):
+        h = self.linear2(self.act_fn(self.linear1(x)))
+        h = self.dropout(h)
+        if self.add_layer_norm:
+            h = self.LayerNorm(h)
+        return h
 
 
 # ===============================

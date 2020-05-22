@@ -100,7 +100,7 @@ class BeliefTracker(nn.Module):
         self.transformer.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
         if self.sa_fuse_type == 'gate':
             self.transformer_fuse = layers.DynamicFusionDropout(self.bert_output_dim, act_fn=ACT2FN[args.fusion_act_fn],
-                                                                gate_type=0, no_transform=True, dropout=self.hidden_dropout_prob)
+                                                                gate_type=1, no_transform=True, dropout=self.hidden_dropout_prob)
         elif self.sa_fuse_type == 'simple':
             self.transformer_fuse = layers.SimpleFusion(self.bert_output_dim * 2, self.bert_output_dim,
                                                         add_layer_norm=args.fuse_add_layer_norm, dropout=self.hidden_dropout_prob)
@@ -119,7 +119,7 @@ class BeliefTracker(nn.Module):
             self.belief_tracker.position_embeddings.weight = self.utterance_encoder.bert.embeddings.position_embeddings.weight
             if self.sa_fuse_type == 'gate':
                 self.belief_tracker_fuse = layers.DynamicFusionDropout(self.bert_output_dim, act_fn=ACT2FN[args.fusion_act_fn],
-                                                                       gate_type=0, no_transform=True, dropout=self.hidden_dropout_prob)
+                                                                       gate_type=1, no_transform=True, dropout=self.hidden_dropout_prob)
             elif self.sa_fuse_type == 'simple':
                 self.belief_tracker_fuse = layers.SimpleFusion(self.bert_output_dim * 2, self.bert_output_dim,
                                                                add_layer_norm=args.fuse_add_layer_norm, dropout=self.hidden_dropout_prob)
@@ -130,11 +130,9 @@ class BeliefTracker(nn.Module):
 
         diag_attn_hidden_dim = int(args.diag_attn_hidden_scale * self.bert_output_dim)
         logger.info(f'Diagonal attention hidden size: {diag_attn_hidden_dim}')
-        self.diag_attn_act = args.diag_attn_act
+
         self.value_attention = layers.DiagonalAttention(self.bert_output_dim, diag_attn_hidden_dim, dropout=self.hidden_dropout_prob,
                                                         act_fn=ACT2FN[args.diag_attn_act_fn])
-        if self.diag_attn_act is not None:
-            self.value_act = layers.MLP(self.bert_output_dim, self.bert_output_dim, self.diag_attn_act)
 
         self.mask_self = args.mask_self
         logger.info(f'If mask self during graph attention: {self.mask_self}')
@@ -156,9 +154,6 @@ class BeliefTracker(nn.Module):
             self.graph_attention = layers.Attention(nbt_config, add_output=args.graph_add_output,
                                                     use_residual=args.graph_add_residual, add_layer_norm=args.graph_add_layer_norm)
 
-        if self.diag_attn_act is not None:
-            self.graph_act = layers.MLP(self.bert_output_dim, self.bert_output_dim, self.diag_attn_act)
-
         self.fuse_type = args.fuse_type
         logger.info(f'Fuse type: {self.fuse_type}')
         if self.fuse_type == 0:
@@ -172,6 +167,9 @@ class BeliefTracker(nn.Module):
         elif self.fuse_type == 3:
             self.graph_project = layers.DynamicFusionDropout(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
                                                              act_fn=ACT2FN[args.fusion_act_fn], dropout=self.hidden_dropout_prob)
+        elif self.fuse_type == 4:
+            self.graph_project = layers.DynamicFusion2(self.bert_output_dim, gate_type=1, no_transform=args.fusion_no_transform,
+                                                       act_fn=ACT2FN[args.fusion_act_fn], test_mode=args.test_mode)
         else:
             raise RuntimeError()
 
@@ -183,10 +181,15 @@ class BeliefTracker(nn.Module):
 
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
+            self.pre_classifier = nn.Linear(self.bert_output_dim, 3)
+            self.pre_classifier.weight = self.classifier.weight
         elif args.cls_type == 1:
             self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
                                             nn.Tanh(),
                                             nn.Linear(self.bert_output_dim, 3))
+            self.pre_classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
+                                                nn.Tanh(),
+                                                nn.Linear(self.bert_output_dim, 3))
         self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim, bias=False)
 
         # Measure
@@ -207,6 +210,8 @@ class BeliefTracker(nn.Module):
         logger.info(f"Graph value scores supervision coherent: {args.graph_value_sup}")
         self.graph_value_sup = args.graph_value_sup
         logger.info(f"Transfer labels supervision coherent: {args.transfer_sup}")
+        self.pre_cls_sup = args.pre_cls_sup
+        logger.info(f'Pre-classifier supervision coherent: {args.pre_cls_sup}')
         self.transfer_sup = args.transfer_sup
 
         # Etc.
@@ -366,14 +371,14 @@ class BeliefTracker(nn.Module):
         value_tensor = self.defined_values
         value_hidden, value_scores = self.value_attention(hidden.view(slot_dim, bs, -1),
                                                           value_tensor, x3=value_tensor, x2_mask=value_mask, return_scores=True)
-        if self.diag_attn_act:
-            value_hidden = self.value_act(value_hidden)
 
         # Value supervision
         masked_value_scores = layers.masked_log_softmax_fp16(value_scores, value_mask, dim=-1)
         masked_value_scores = masked_value_scores.view(slot_dim, ds, ts, -1)
         if self.save_gate and not self.training:
             self.value_scores.append(torch.softmax(masked_value_scores, dim=-1).detach().cpu().float())
+
+        pre_slot_gate_scores = self.pre_classifier(hidden).view(slot_dim, bs, -1).transpose(0, 1).reshape(-1, 3)
 
         # Construct graph
         hidden = hidden.view(slot_dim, ds, ts, -1)
@@ -404,28 +409,27 @@ class BeliefTracker(nn.Module):
             raise RuntimeError()
 
         graph_hidden = graph_hidden.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
-        if self.diag_attn_act:
-            graph_hidden = self.graph_act(graph_hidden)
 
         if self.save_gate and not self.training:
             self.graph_scores.append(torch.softmax(graph_scores.view(ds, ts - 1, slot_dim, -1), dim=-1).detach().cpu())
 
         # Fusion
-        if self.fuse_type in [0, 3]:
+        if self.fuse_type in [0, 3, 4]:
             graph_hidden, gate = self.graph_project(hidden[:, :, 1:], graph_hidden)
             if self.save_gate and not self.training:
                 self.gate_metric.append(gate.detach().cpu().float())
         else:
             graph_hidden = self.graph_project(hidden[:, :, 1:], graph_hidden)
 
-        if self.slot_res is not None:
-            ini_hidden = graph_query.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
-            graph_hidden[self.slot_res, :, :, :] = ini_hidden[self.slot_res, :, :, :]
+        # if self.slot_res is not None:
+        #     ini_hidden = graph_query.view(ds, ts - 1, slot_dim, -1).permute(2, 0, 1, 3)
+        #     graph_hidden[self.slot_res, :, :, :] = ini_hidden[self.slot_res, :, :, :]
 
         hidden = torch.cat([hidden[:, :, 0].unsqueeze(2), graph_hidden], dim=2)
 
+        loss = self.pre_cls_sup * self.nll(pre_slot_gate_scores, answer_type_ids.view(-1)) / ds
+
         # Graph supervision
-        loss = 0
         if self.graph_add_sup > 0:
             slot_target = answer_type_ids[:, :-1].contiguous().view(ds * (ts - 1), 1, slot_dim).expand(-1, slot_dim, -1)
             loss = self.graph_add_sup * layers.negative_entropy(score=graph_scores,

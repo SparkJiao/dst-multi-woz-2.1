@@ -502,6 +502,7 @@ def main():
                         type=str,
                         required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
+    parser.add_argument('--predict_dir', default=None, type=str)
     parser.add_argument("--target_slot",
                         default='all',
                         type=str,
@@ -724,6 +725,15 @@ def main():
     parser.add_argument('--num_layers', default=0, type=int)
     parser.add_argument('--hop_update_self', default=False, action='store_true')
     parser.add_argument('--graph_attn_type', default=0, type=int)
+    parser.add_argument('--graph_dropout', default=0.1, type=float)
+    parser.add_argument('--sa_act_1', default=None, type=str)
+
+    parser.add_argument('--sa_fuse_type', default='gate', type=str)
+    parser.add_argument('--fuse_add_layer_norm', default=False, action='store_true')
+    parser.add_argument('--pre_cls_sup', default=1.0, type=float)
+
+    parser.add_argument('--mask_top_k', type=int, default=0)
+    parser.add_argument('--test_mode', default=-1, type=int)
 
     args = parser.parse_args()
 
@@ -949,6 +959,8 @@ def main():
         from BeliefTrackerShareSA_cls_graph2_gate import BeliefTracker
     elif args.nbt == 'graph2_p':
         from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
+    elif args.nbt == 'graph2_p_test_mask':
+        from BeliefTrackerShareSA_cls_graph2_plus_test_mask import BeliefTracker
     elif args.nbt == 'graph2_p_test':
         from BeliefTrackerShareSA_cls_graph2_plus_test import BeliefTracker
     elif args.nbt == 'graph2_p_emb_baseline':
@@ -981,6 +993,8 @@ def main():
         from BeliefTrackerShareSA_cls_graph4 import BeliefTracker
     elif args.nbt == 'graph5':
         from BeliefTrackerShareSA_cls_graph5 import BeliefTracker
+    elif args.nbt == 'graph6':
+        from BeliefTrackerShareSA_cls_graph6 import BeliefTracker
     elif args.nbt == 'graph_re':
         from BeliefTrackerShareSA_cls_graph_re import BeliefTracker
     elif args.nbt == 'copy':
@@ -1287,7 +1301,11 @@ def main():
     # Evaluation
     ###############################################################################
     # Load a trained model that you have fine-tuned
-    for state_name in ['pytorch_model.bin', 'pytorch_model_loss.bin']:
+    predict_dir = args.predict_dir if args.predict_dir is not None else args.output_dir
+    if not os.path.exists(predict_dir):
+        os.makedirs(predict_dir, exist_ok=True)
+    # for state_name in ['pytorch_model.bin', 'pytorch_model_loss.bin']:
+    for state_name in ['pytorch_model.bin']:
         if not os.path.exists(os.path.join(args.output_dir, state_name)):
             continue
         model = BeliefTracker(args, num_labels, device)
@@ -1432,7 +1450,7 @@ def main():
             out_file_name = f'eval_results_{state_name}'
             if args.target_slot == 'all':
                 out_file_name += '_all'
-            output_eval_file = os.path.join(args.output_dir, "%s.txt" % out_file_name)
+            output_eval_file = os.path.join(predict_dir, "%s.txt" % out_file_name)
 
             with open(output_eval_file, "w") as writer:
                 logger.info("***** Eval results *****")
@@ -1440,15 +1458,15 @@ def main():
                     logger.info("  %s = %s", key, str(result[key]))
                     writer.write("%s = %s\n" % (key, str(result[key])))
 
-            with open(os.path.join(args.output_dir, f"predictions_{state_name}.json"), 'w') as f:
+            with open(os.path.join(predict_dir, f"predictions_{state_name}.json"), 'w') as f:
                 json.dump(predictions, f, indent=2)
 
             if hasattr(model, "get_metric"):
-                with open(os.path.join(args.output_dir, f"eval_metric_{state_name}.json"), 'w') as f:
+                with open(os.path.join(predict_dir, f"eval_metric_{state_name}.json"), 'w') as f:
                     json.dump(model.get_metric(reset=False), f, indent=2)
 
             out_file_name = f'eval_all_accuracies_{state_name}'
-            with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
+            with open(os.path.join(predict_dir, "%s.txt" % out_file_name), 'w') as f:
                 f.write(
                     'joint acc (5 domain) : %.5f \t slot acc (5 domain) : %.5f \n'
                     'joint acc type (5 domain) : %.5f \t slot acc type (5 domain) : %.5f \n'
