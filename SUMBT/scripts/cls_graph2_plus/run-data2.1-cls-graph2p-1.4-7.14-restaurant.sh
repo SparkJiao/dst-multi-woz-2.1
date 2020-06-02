@@ -21,6 +21,7 @@ bert_dir='/home/jiaofangkai/'
 #--max_loss_scale 256 --value_embedding_type mean --sa_add_layer_norm
 
 target_slot='all'
+domain_list='data/multiwoz2.1_5/domain_list.json'
 
 python code/main-multislot-share-5-newcls.py --do_eval --num_train_epochs 5 --data_dir data/multiwoz2.1_5 \
 --bert_model bert-base-uncased --do_lower_case --bert_dir $bert_dir --task_name bert-gru-sumbt \
@@ -35,4 +36,4 @@ python code/main-multislot-share-5-newcls.py --do_eval --num_train_epochs 5 --da
 --test_file data/multiwoz2.1_5/test-5-full-value.tsv \
 --ontology data/multiwoz2.1_5/ontology-full.json \
 --cls_type 0 --extra_nbt --graph_value_sup 1.0 --attn_head 12 --extra_nbt_attn_head 12 --diag_attn_hidden_scale 1.0 \
---max_loss_scale 256 --value_embedding_type mean --sa_add_layer_norm --train_single restaurant
+--max_loss_scale 256 --value_embedding_type mean --sa_add_layer_norm --train_single restaurant --domain_list ${domain_list}

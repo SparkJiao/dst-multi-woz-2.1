@@ -9,18 +9,18 @@ import time
 
 import numpy as np
 import torch
-from pytorch_pretrained_bert.optimization import BertAdam
-from pytorch_pretrained_bert.tokenization import BertTokenizer
-from tensorboardX import SummaryWriter
 from torch.nn import Parameter
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
+from transformers import AdamW, AutoTokenizer, get_linear_schedule_with_warmup, tokenization_roberta, tokenization_distilbert
 
 try:
     from .global_logger import register_logger, register_summary_writer
+    from torch.utils.tensorboard import SummaryWriter
 except ImportError:
     from global_logger import register_logger, register_summary_writer
+    from tensorboardX import SummaryWriter
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -124,31 +124,18 @@ class Processor(DataProcessor):
                 ontology[slot].append("undefined")
             fp_ontology.close()
 
-            if config.domain_list is not None:
-                domain_list = json.load(open(config.domain_list, 'r'))
-            else:
-                domain_list = None
-
-            self.include_dialogue_list = []
             if not config.target_slot == 'all':
                 slot_idx = {'attraction': '0:1:2', 'hotel': '3:4:5:6:7:8:9:10:11:12',
                             'restaurant': '13:14:15:16:17:18:19', 'taxi': '20:21:22:23', 'train': '24:25:26:27:28:29'}
                 target_slot = []
-                if domain_list:
-                    for dom, dom_ls in domain_list.items():
-                        if dom != config.target_slot:
-                            self.include_dialogue_list.extend(dom_ls)
                 for key, value in slot_idx.items():
                     if key != config.target_slot:
                         target_slot.append(value)
                 config.target_slot = ':'.join(target_slot)
-
             elif not config.train_single == 'all':
                 slot_idx = {'attraction': '0:1:2', 'hotel': '3:4:5:6:7:8:9:10:11:12',
                             'restaurant': '13:14:15:16:17:18:19', 'taxi': '20:21:22:23', 'train': '24:25:26:27:28:29'}
                 # target_slot = []
-                if domain_list:
-                    self.include_dialogue_list.extend(domain_list[config.train_single])
                 for key, value in slot_idx.items():
                     if key == config.train_single:
                         # target_slot.append(value)
@@ -156,7 +143,6 @@ class Processor(DataProcessor):
                         break
                 # config.target_slot = ':'.join(target_slot)
 
-            self.include_dialogue_list = set(self.include_dialogue_list)
         else:
             raise NotImplementedError()
 
@@ -185,7 +171,6 @@ class Processor(DataProcessor):
 
         logger.info('Processor: target_slot')
         logger.info(self.target_slot)
-        logger.info(f'Include dialogue amount in total: {len(self.include_dialogue_list)}')
         logger.info(f'Will reverse input: {self.reverse}')
 
     def get_train_examples(self, data_dir, accumulation=False, train_file=None):
@@ -221,8 +206,6 @@ class Processor(DataProcessor):
         prev_dialogue_index = None
         examples = []
         for (i, line) in enumerate(lines):
-            if line[0] not in self.include_dialogue_list:
-                continue
             guid = "%s-%s-%s" % (set_type, line[0], line[1])  # line[0]: dialogue index, line[1]: turn index
             if accumulation:
                 if prev_dialogue_index is None or prev_dialogue_index != line[0]:
@@ -402,7 +385,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     logger.info(f"None: {none_values}")
     logger.info(f"Do not care: {care_values}")
     logger.info(f"PICK: {ptr_values}")
-    logger.info(f"Dialogue amount: {all_input_ids.size(0)}")
 
     return all_input_ids, all_input_len, all_answer_type_ids, all_label_ids
 
@@ -509,6 +491,7 @@ def main():
     parser.add_argument("--bert_dir", default='/home/.pytorch_pretrained_bert',
                         type=str, required=False,
                         help="The directory of the pretrained BERT model")
+    parser.add_argument('--bert_name', default='bert-base-uncased')
     parser.add_argument("--task_name",
                         default=None,
                         type=str,
@@ -527,7 +510,6 @@ def main():
                         required=True,
                         help="Target slot idx to train model. ex. 'all', '0:1:2', or an excluding slot name 'attraction'")
     parser.add_argument('--train_single', default='all', type=str)
-    parser.add_argument('--domain_list', default=None, type=str)
     parser.add_argument("--tf_dir",
                         default='tensorboard',
                         type=str,
@@ -648,6 +630,8 @@ def main():
     parser.add_argument("--do_not_use_tensorboard",
                         action='store_true',
                         help="Whether to run eval on the test set.")
+    parser.add_argument('--adam_epsilon', default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+
     parser.add_argument('--pretrain', type=str, default=None)
     parser.add_argument('--model_id', type=int, default=1)
     parser.add_argument('--use_query', default=False, action='store_true')
@@ -827,10 +811,10 @@ def main():
     num_labels = [len(labels) - 1 for labels in label_list]  # number of slot-values in each slot-type
 
     # tokenizer
-    vocab_dir = os.path.join(args.bert_dir, '%s-vocab.txt' % args.bert_model)
-    if not os.path.exists(vocab_dir):
-        raise ValueError("Can't find %s " % vocab_dir)
-    tokenizer = BertTokenizer.from_pretrained(vocab_dir, do_lower_case=args.do_lower_case)
+    # vocab_dir = os.path.join(args.bert_dir, '%s-vocab.txt' % args.bert_model)
+    # if not os.path.exists(vocab_dir):
+    #     raise ValueError("Can't find %s " % vocab_dir)
+    tokenizer = AutoTokenizer.from_pretrained(args.bert_dir, do_lower_case=args.do_lower_case)
 
     num_train_steps = None
     accumulation = False
@@ -892,143 +876,10 @@ def main():
     ###############################################################################
 
     # Prepare model
-    if args.nbt == 'rnn':
-        logger.info("Use rnn as neural belief tracker")
-        from BeliefTrackerShare import BeliefTracker
-    elif args.nbt == 'transformer':
-        from BeliefTrackerShareSA_cls_transformer import BeliefTracker
-    elif args.nbt == 'sa':
-        logger.info("Use simple self-attention as neural belief tracker")
-        from BeliefTrackerShareSA import BeliefTracker
-    elif args.nbt == 'bert':
-        logger.info("Initialize transformer dialog encoder from pre-trained BERT")
-        from BeliefTrackerShareBert import BeliefTracker
-    elif args.nbt == 'flat_test1':
-        logger.info("This is another test for flat slot attention but self attention mask.")
-        from BeliefTrackerShareSA_flat_test1_cls import BeliefTracker
-    elif args.nbt == 'flat_test1_f':
-        from BeliefTrackerShareSA_flat_test1_cls_f import BeliefTracker
-    elif args.nbt == 'flat_test1_ff':
-        from BeliefTrackerShareSA_flat_test1_cls_ff import BeliefTracker
-    elif args.nbt == 'extend_new':
-        logger.info("This model uses a new extended attention module")
-        from BeliefTrackerShareSA_double_attn1_cls import BeliefTracker
-    elif args.nbt == 'sa_cache_type':
-        from BeliefTrackerShareSA_cache_type import BeliefTracker
-    elif args.nbt == 'ini_sa_cache_flat':
-        from BeliefTrackerShareSA_init_cache_flat import BeliefTracker
-    elif args.nbt == 'sa_cache_type_prop':
-        from BeliefTrackerShareSA_cache_type_prop_cls import BeliefTracker
-    elif args.nbt == 'sa_cache_type_prop_2':
-        from BeliefTrackerShareSA_cache_type_prop_cls2 import BeliefTracker
-    elif args.nbt == 'sa_cache_type_prop_fold':
-        from BeliefTrackerShareSA_cache_type_prop_fold_cls import BeliefTracker
-    elif args.nbt == 'cache_combine':
-        from BeliefTrackerShareSA_cls_cb import BeliefTracker
-    elif args.nbt == 'stack':
-        from BeliefTrackerShareSA_stack import BeliefTracker
-    elif args.nbt == 'stack_remove':
-        from BeliefTrackerShareSA_stack_remove import BeliefTracker
-    elif args.nbt == 'stack_ex':
-        from BeliefTrackerShareSA_stack_ex import BeliefTracker
-    elif args.nbt == 'dstc':
-        from BeliefTracker_dstc import BeliefTracker
-    elif args.nbt == 'fuse':
-        from BeliefTrackerShareSA_fusion import BeliefTracker
-    elif args.nbt == 'flow':
-        from BeliefTrackerShareSA_flat_flow import BeliefTracker
-    elif args.nbt == 'flow2':
-        from BeliefTrackerShareSA_flat_flow2 import BeliefTracker
-    elif args.nbt == 'flow3':
-        from BeliefTrackerShareSA_flat_flow3 import BeliefTracker
-    elif args.nbt == 'hie_fuse':
-        from BeliefTrackerShareSA_flat_hie_cls import BeliefTracker
-    elif args.nbt == 'hie_tr':
-        from BeliefTrackerShareSA_flat_hie_cls_tr import BeliefTracker
-    elif args.nbt == 'hie_simple':
-        from BeliefTrackerShareSA_flat_hie_cls_simple import BeliefTracker
-    elif args.nbt == 'hie_mt':
-        from BeliefTrackerShareSA_flat_hie_cls_mt import BeliefTracker
-    elif args.nbt == 'hie_domain':
-        from BeliefTrackerShareSA_flat_hie_cls_domain import BeliefTracker
-    elif args.nbt == 'flow_hie':
-        from BeliefTrackerShareSA_flat_flow_hie import BeliefTracker
-    elif args.nbt == 'flat_xl':
-        from BeliefTrackerShareSA_flat_xl import BeliefTracker
-    elif args.nbt == 'flat_xl2':
-        from BeliefTrackerShareSA_flat_xl2 import BeliefTracker
-    elif args.nbt == 'flat_xl3':
-        from BeliefTrackerShareSA_flat_xl3 import BeliefTracker
-    elif args.nbt == 'flat_xl4':
-        from BeliefTrackerShareSA_flat_xl4 import BeliefTracker
-    elif args.nbt == 'flat_xl5':
-        from BeliefTrackerShareSA_flat_xl5 import BeliefTracker
-    elif args.nbt == 'flat_xl6':
-        from BeliefTrackerShareSA_flat_xl6 import BeliefTracker
-    elif args.nbt == 'hie_pp':
-        from BeliefTrackerShareSA_pp_hie_cls import BeliefTracker
-    elif args.nbt == 'graph':
-        from BeliefTrackerShareSA_cls_graph import BeliefTracker
-    elif args.nbt == 'graph2':
-        from BeliefTrackerShareSA_cls_graph2 import BeliefTracker
-    elif args.nbt == 'graph2f':
-        from BeliefTrackerShareSA_cls_graph2_f import BeliefTracker
-    elif args.nbt == 'graph2_no':
-        from BeliefTrackerShareSA_cls_graph2_no import BeliefTracker
-    elif args.nbt == 'graph2_gate':
-        from BeliefTrackerShareSA_cls_graph2_gate import BeliefTracker
+    if args.nbt == 'transformer':
+        from cls_aug_transformer import BeliefTracker
     elif args.nbt == 'graph2_p':
-        from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
-    elif args.nbt == 'graph2_p_test_mask':
-        from BeliefTrackerShareSA_cls_graph2_plus_test_mask import BeliefTracker
-    elif args.nbt == 'graph2_p_test':
-        from BeliefTrackerShareSA_cls_graph2_plus_test import BeliefTracker
-    elif args.nbt == 'graph2_p_emb_baseline':
-        from BeliefTrackerShareSA_cls_graph2_plus_emb_baseline import BeliefTracker
-    elif args.nbt == 'graph2_p_latent_baseline':
-        from BeliefTrackerShareSA_cls_graph2_plus_latent_baseline import BeliefTracker
-    elif args.nbt == 'graph2p_multi_hop':
-        from BeliefTrackerShareSA_cls_graph2p_multi_hop import BeliefTracker
-    elif args.nbt == 'graph2_pp':
-        from BeliefTrackerShareSA_cls_graph2_pp import BeliefTracker
-    elif args.nbt == 'graph2_ppp':
-        from BeliefTrackerShareSA_cls_graph2_ppp import BeliefTracker
-    elif args.nbt == 'graph2_p_baseline':
-        from BeliefTrackerShareSA_cls_graph2_plus_baseline import BeliefTracker
-    elif args.nbt == 'graph2_p_stack':
-        from BeliefTrackerShareSA_cls_graph2_plus_stack import BeliefTracker
-    elif args.nbt == 'graph_multi_view':
-        from BeliefTrackerShareSA_cls_graph_multi_view import BeliefTracker
-    elif args.nbt == 'graph_multi_view2':
-        from BeliefTrackerShareSA_cls_graph_multi_view2 import BeliefTracker
-    elif args.nbt == 'graph_multi_view3':
-        from BeliefTrackerShareSA_cls_graph_multi_view3 import BeliefTracker
-    elif args.nbt == 'graph_multi_view4':
-        from BeliefTrackerShareSA_cls_graph_multi_view4 import BeliefTracker
-    elif args.nbt == 'graph_multi_view5':
-        from BeliefTrackerShareSA_cls_graph_multi_view5 import BeliefTracker
-    elif args.nbt == 'graph3':
-        from BeliefTrackerShareSA_cls_graph3 import BeliefTracker
-    elif args.nbt == 'graph4':
-        from BeliefTrackerShareSA_cls_graph4 import BeliefTracker
-    elif args.nbt == 'graph5':
-        from BeliefTrackerShareSA_cls_graph5 import BeliefTracker
-    elif args.nbt == 'graph6':
-        from BeliefTrackerShareSA_cls_graph6 import BeliefTracker
-    elif args.nbt == 'graph_re':
-        from BeliefTrackerShareSA_cls_graph_re import BeliefTracker
-    elif args.nbt == 'copy':
-        from BeliefTrackerShareSA_cls_copy import BeliefTracker
-    elif args.nbt == 's_xl':
-        from BeliefTrackerShareSA_flat_s_xl import BeliefTracker
-    elif args.nbt == 'context':
-        from BeliefTrackerShareSA_cls_context import BeliefTracker
-    elif args.nbt == 'context_verify':
-        from BeliefTrackerShareSA_cls_context_verify import BeliefTracker
-    elif args.nbt == 'context_stacked':
-        from BeliefTrackerShareSA_cls_context_stacked import BeliefTracker
-    elif args.nbt == 'context_stacked2':
-        from BeliefTrackerShareSA_cls_context_stacked2 import BeliefTracker
+        from cls_graph2p_distill import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -1062,12 +913,10 @@ def main():
     if args.do_train:
         def get_optimizer_grouped_parameters(model):
             param_optimizer = [(n, p) for n, p in model.named_parameters() if p.requires_grad and 'pooler' not in n]
-            no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+            no_decay = ['bias', 'LayerNorm.weight']
             optimizer_grouped_parameters = [
-                {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01,
-                 'lr': args.learning_rate},
-                {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
-                 'lr': args.learning_rate},
+                {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+                {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
             ]
             return optimizer_grouped_parameters
 
@@ -1078,16 +927,17 @@ def main():
         if args.local_rank != -1:
             t_total = t_total // torch.distributed.get_world_size()
 
-        optimizer = BertAdam(optimizer_grouped_parameters,
-                             lr=args.learning_rate,
-                             warmup=args.warmup_proportion,
-                             t_total=t_total,
-                             max_grad_norm=args.max_grad_norm)
+        # no bias correct_bias for BERT
+        optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon, correct_bias=False)
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(t_total * args.warmup_proportion),
+                                                    num_training_steps=t_total)
+
         if args.fp16:
             try:
                 from apex import amp
             except ImportError:
                 raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+
             if args.max_loss_scale is not None:
                 model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level, max_loss_scale=args.max_loss_scale)
             else:
@@ -1154,7 +1004,6 @@ def main():
                 if args.fp16:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
                         scaled_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
                     loss.backward()
 
@@ -1163,26 +1012,32 @@ def main():
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     # modify lealrning rate with special warm up BERT uses
-                    lr_this_step = optimizer.get_lr()[0]
+                    if args.fp16:
+                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+
+                    optimizer.step()
+                    scheduler.step()
+                    model.zero_grad()
+                    global_step += 1
+
+                    lr_this_step = scheduler.get_lr()[0]
                     if summary_writer is not None:
                         summary_writer.add_scalar("Epoch", epoch, global_step)
                         summary_writer.add_scalar("Train/Loss", loss, global_step)
                         summary_writer.add_scalar("Train/JointAcc", acc, global_step)
                         summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
-                        # if n_gpu == 1:
-                        #     for i, slot in enumerate(processor.target_slot):
-                        #         summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
-                        #                                   global_step)
-                        #         summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
-                        #                                   global_step)
-                        #     if hasattr(model, "get_metric"):
-                        #         metric = model.get_metric(reset=False)
-                        #         for k, v in metric.items():
-                        #             summary_writer.add_scalar(f"Train/{k}", v, global_step)
-
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    global_step += 1
+                        if n_gpu == 1:
+                            for i, slot in enumerate(processor.target_slot):
+                                summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
+                                                          global_step)
+                                summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
+                                                          global_step)
+                            if hasattr(model, "get_metric"):
+                                metric = model.get_metric(reset=False)
+                                for k, v in metric.items():
+                                    summary_writer.add_scalar(f"Train/{k}", v, global_step)
 
                     if global_step % args.per_eval_steps == 0:
 
@@ -1273,12 +1128,14 @@ def main():
                         dev_loss = round(dev_loss, 6)
                         if last_update is None or dev_acc > best_acc:
                             # Save a trained model
+                            # output_model_dir = os.path.join(args.output_dir, "model_dir")
                             output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
                             if args.do_train:
                                 if n_gpu == 1:
                                     torch.save(model.state_dict(), output_model_file)
                                 else:
                                     torch.save(model.module.state_dict(), output_model_file)
+                                # model.save_pretrained(output_model_dir)
 
                             last_update = global_step
                             best_acc = dev_acc
@@ -1293,12 +1150,14 @@ def main():
 
                         if last_loss_update is None or dev_loss < best_loss:
                             # Save a trained model
+                            # output_model_dir = os.path.join(args.output_dir, "loss_model_dir")
                             output_model_file = os.path.join(args.output_dir, "pytorch_model_loss.bin")
                             if args.do_train:
                                 if n_gpu == 1:
                                     torch.save(model.state_dict(), output_model_file)
                                 else:
                                     torch.save(model.module.state_dict(), output_model_file)
+                            # model.save_pretrained(output_model_dir)
 
                             last_loss_update = global_step
                             best_loss = dev_loss
@@ -1311,10 +1170,10 @@ def main():
                                 "Lowest Loss Model NOT Updated: Epoch=%d, Validation Loss=%.6f, Validation Acc=%.6f" % (
                                     global_step, dev_loss, dev_acc))
 
-                        if last_update and last_update + args.patience * args.per_eval_steps <= global_step:
+                        if last_update + args.patience * args.per_eval_steps <= global_step:
                             break
 
-            if last_update and last_update + args.patience * args.per_eval_steps <= global_step:
+            if last_update + args.patience * args.per_eval_steps <= global_step:
                 break
 
     ###############################################################################

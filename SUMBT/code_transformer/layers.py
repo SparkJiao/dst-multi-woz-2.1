@@ -5,8 +5,8 @@ import copy
 import random
 
 import torch
-from pytorch_pretrained_bert.modeling import BertConfig, BertPreTrainedModel, gelu, BertSelfAttention, BertLayerNorm, ACT2FN, \
-    BertIntermediate, BertOutput
+from transformers import BertConfig, BertPreTrainedModel
+from transformers.modeling_bert import BertSelfAttention, BertLayerNorm, ACT2FN, BertIntermediate, BertOutput, gelu
 from torch import distributions
 from torch import nn
 from torch.nn import Parameter
