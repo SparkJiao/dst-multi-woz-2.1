@@ -5,19 +5,19 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import DistilBertPreTrainedModel
+from transformers import BertPreTrainedModel, BertModel
+from transformers.modeling_bert import BertEncoder
 from transformers.activations import gelu
 import copy
 
 try:
     from . import layers
     from .metric import Average
-    from .modeling_distilbert_ex import DistilBertModel, SimpleDialogSelfAttention
     from .global_logger import get_child_logger
     from .transformer import PreLNTransformer
 except ImportError:
     import layers
     from metric import Average
-    from modeling_distilbert_ex import DistilBertModel, SimpleDialogSelfAttention
     from transformer import PreLNTransformer
     from global_logger import get_child_logger
 
@@ -26,15 +26,15 @@ logger: Logger = get_child_logger(__name__)
 ACT2FN = {'gelu': gelu, "relu": F.relu, "tanh": F.tanh}
 
 
-class BertForUtteranceEncoding(DistilBertPreTrainedModel):
+class BertForUtteranceEncoding(BertPreTrainedModel):
     def __init__(self, config):
         super(BertForUtteranceEncoding, self).__init__(config)
         self.config = config
-        self.distilbert = DistilBertModel(config)
+        self.bert = BertModel(config)
 
-    def forward(self, input_ids=None, attention_mask=None, head_mask=None, inputs_embeds=None, attn_cache=None, **kwargs):
-        return self.distilbert(input_ids=input_ids, attention_mask=attention_mask, head_mask=head_mask,
-                               inputs_embeds=inputs_embeds, attn_cache=attn_cache, **kwargs)
+    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, head_mask=None, inputs_embeds=None):
+        return self.bert(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, head_mask=head_mask,
+                         inputs_embeds=inputs_embeds)
 
 
 class BeliefTracker(nn.Module):
@@ -54,8 +54,8 @@ class BeliefTracker(nn.Module):
 
         # Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(args.bert_dir)
-        self.bert_output_dim = self.utterance_encoder.config.dim
-        self.hidden_dropout_prob = self.utterance_encoder.config.dropout if args.dropout is None else args.dropout
+        self.bert_output_dim = self.utterance_encoder.config.hidden_size
+        self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob if args.dropout is None else args.dropout
         logger.info(f'Dropout prob: {self.hidden_dropout_prob}')
         if args.fix_bert:
             logger.info('Fix all parameters of bert encoder')
@@ -73,27 +73,12 @@ class BeliefTracker(nn.Module):
 
         # NBT
         nbt_config = copy.deepcopy(self.sv_encoder.config)
-        nbt_config.n_layers = args.num_layers
-        # nbt_config.n_heads = self.attn_head
-        nbt_config.dropout = self.hidden_dropout_prob
-        nbt_config.context_attn = True
-        nbt_config.interact_attn = True
-        nbt_config.matching_attn = True
+        nbt_config.num_hidden_layers = args.num_layers
+        self.nbt_config = nbt_config
 
-        self.position_embedding = self.utterance_encoder.distilbert.embeddings.position_embeddings
-        self.transformer = PreLNTransformer(nbt_config)
-        self.final_layer_norm = nn.LayerNorm(self.bert_output_dim, eps=1e-12)
-
-        self.linear_seq = layers.LinearSeq(self.bert_output_dim)
-
-        self.mask_self = args.mask_self
-        logger.info(f'If mask self during graph attention: {self.mask_self}')
-
-        if args.slot_res is not None:
-            self.slot_res = [int(x) for x in args.slot_res.split(":")]
-            logger.info(f'Slot restriction: {self.slot_res}')
-        else:
-            self.slot_res = None
+        self.position_embedding = self.utterance_encoder.bert.embeddings.position_embeddings
+        self.positionLayerNorm = nn.LayerNorm(self.bert_output_dim, eps=nbt_config.layer_norm_eps)
+        self.transformer = BertEncoder(nbt_config)
 
         if args.cls_type == 0:
             self.classifier = nn.Linear(self.bert_output_dim, 3)
@@ -137,17 +122,21 @@ class BeliefTracker(nn.Module):
         self.sv_encoder.eval()
 
         # register slot input buffer
-        slot_mask = slot_ids > 0
+        slot_mask = slot_ids > 0  # (slot_dim, slot_len)
+        slot_dim, slot_len = slot_mask.size()
+        slot_to_slot_mask = torch.zeros(slot_dim, slot_dim, slot_len)
+        for i in range(slot_dim):
+            slot_to_slot_mask[i, i] = slot_mask[i]
+        slot_to_slot_mask = slot_to_slot_mask.unsqueeze(1).expand(-1, slot_len, -1, -1).reshape(slot_dim * slot_len, slot_dim * slot_len)
+        seq_to_slot_mask = torch.zeros((self.max_seq_length, slot_len * slot_dim), dtype=torch.long, device=self.device)
 
         self.register_buffer("slot_ids", slot_ids)
-        # self.register_buffer("slot_token_type_ids", slot_token_type_ids)
+        if slot_token_type_ids is None:
+            slot_token_type_ids = slot_ids.new_zeros(slot_ids.size())
+        self.register_buffer("slot_token_type_ids", slot_token_type_ids)
         self.register_buffer("slot_mask", slot_mask.to(dtype=torch.long))
-
-        if self.slot_res is not None:
-            slot_dim = slot_ids.size(0)
-            slot_res = torch.ones(slot_dim, slot_dim, device=self.device, dtype=torch.long)
-            slot_res[:, self.slot_res] = torch.zeros(slot_dim, len(self.slot_res), device=self.device, dtype=torch.long)
-            self.slot_res = slot_res
+        self.register_buffer("slot_to_slot_mask", slot_to_slot_mask.to(dtype=torch.long, device=self.device))
+        self.register_buffer("seq_to_slot_mask", seq_to_slot_mask)
 
         max_value_num = 0
         value_list = []
@@ -205,45 +194,37 @@ class BeliefTracker(nn.Module):
         bs = ds * ts
         slot_dim = len(target_slot)
 
+        attention_mask = attention_mask.view(-1, 1, self.max_seq_length).to(dtype=torch.long)
+        flat_attention_mask = attention_mask.view(-1, 1, self.max_seq_length).expand(-1, self.max_seq_length, -1)  # (bs, seq_len, seq_len)
+        # (bs, seq_len, seq_len + slot_len)
+        flat_attention_mask = torch.cat([flat_attention_mask, self.seq_to_slot_mask.unsqueeze(0).expand(bs, -1, -1)], dim=-1)
+        # (bs, slot_len, seq_len + slot_len)
+        slot_flat_mask = torch.cat([attention_mask.expand(-1, self.max_slot_length * slot_dim, -1),
+                                    self.slot_to_slot_mask.unsqueeze(0).expand(bs, -1, -1)], dim=-1)
+        attention_mask = torch.cat([flat_attention_mask, slot_flat_mask], dim=1)
+        input_ids = torch.cat([input_ids.view(-1, self.max_seq_length), self.slot_ids.unsqueeze(0).expand(
+            bs, -1, -1).reshape(bs, slot_dim * self.max_slot_length)], dim=1)
+        token_type_ids = torch.cat([token_type_ids.view(-1, self.max_seq_length), self.slot_token_type_ids.unsqueeze(0).expand(
+            bs, -1, -1).reshape(bs, -1)], dim=1)
+
         # Utterance encoding
-        output = self.utterance_encoder(input_ids=input_ids.view(-1, self.max_seq_length),
-                                        attention_mask=attention_mask.view(-1, self.max_seq_length))
-        utt_h, all_attn_cache = output[0], output[1]
+        output = self.utterance_encoder(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
+        slot_hidden = output[0][:, self.max_seq_length:]
+        slot_hidden = slot_hidden.view(bs, slot_dim, self.max_slot_length, self.bert_output_dim)
+        slot_h = slot_hidden[:, :, 0].view(ds, ts, slot_dim, -1).transpose(1, 2).reshape(ds * slot_dim, ts, -1)
 
-        assert type(all_attn_cache) == list
-        n_heads = self.utterance_encoder.config.n_heads
-        dim_per_head = self.bert_output_dim // n_heads
-        for i in range(self.utterance_encoder.config.n_layers):
-            all_attn_cache[i]["key"] = all_attn_cache[i]["key"].unsqueeze(0).expand(slot_dim, -1, -1, -1, -1).reshape(
-                -1, n_heads, self.max_seq_length, dim_per_head)
-            all_attn_cache[i]["value"] = all_attn_cache[i]["value"].unsqueeze(0).expand(slot_dim, -1, -1, -1, -1).reshape(
-                -1, n_heads, self.max_seq_length, dim_per_head)
-
-        # Domain-slot encoding
-        slot_ids = self.slot_ids.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
-        slot_mask = self.slot_mask.unsqueeze(1).expand(-1, bs, -1).reshape(-1, self.max_slot_length)
-        slot_mask = torch.cat(
-            [attention_mask.unsqueeze(0).expand(slot_dim, -1, -1, -1).reshape(-1, self.max_seq_length),
-             slot_mask.to(dtype=attention_mask.dtype)], dim=-1)
-
-        hidden = self.utterance_encoder(input_ids=slot_ids, attention_mask=slot_mask, attn_cache=all_attn_cache,
-                                        start_offset=self.max_seq_length)[0]
-        hidden = self.linear_seq(hidden).view(slot_dim, ds, ts, -1).permute(1, 2, 0, 3).contiguous()
-
-        turn_ids = torch.arange(ts, dtype=torch.long, device=hidden.device)
+        turn_ids = torch.arange(ts, dtype=torch.long, device=self.device)
         casual_mask = turn_ids[None, :].repeat(ts, 1) <= turn_ids[:, None]
         casual_mask = casual_mask.unsqueeze(0).expand(ds * slot_dim, -1, -1)
+        casual_mask = self.utterance_encoder.get_extended_attention_mask(casual_mask, (ds * slot_dim, ts), self.device)
 
-        turn_embedding = self.position_embedding(turn_ids)[None, :, None, :].repeat(ds, 1, slot_dim, 1)
-        hidden = hidden + turn_embedding
+        turn_embedding = self.position_embedding(turn_ids).unsqueeze(0).expand(ds * slot_dim, -1, -1)
+        slot_h = self.dropout(self.positionLayerNorm(turn_embedding + slot_h))
 
-        if self.mask_self:
-            interact_mask = torch.ones(bs, slot_dim, dtype=torch.long, device=hidden.device)
-        else:
-            interact_mask = (1 - torch.diag(torch.ones(slot_dim, dtype=torch.long, device=hidden.device))).unsqueeze(0).repeat(bs, 1, 1)
-        hidden = self.transformer(hidden, utt_h, utt_mask=attention_mask.view(-1, self.max_seq_length),
-                                  casual_mask=casual_mask, attn_mask=interact_mask)[0]
-        hidden = self.final_layer_norm(hidden).permute(2, 0, 1, 3).contiguous()
+        # (ds * slot_dim, ts, h)
+        hidden = self.transformer(slot_h, casual_mask,
+                                  head_mask=self.utterance_encoder.get_head_mask(None, self.nbt_config.num_hidden_layers))[0]
+        hidden = hidden.view(ds, slot_dim, ts, -1).transpose(0, 1).contiguous()
 
         loss = 0
 

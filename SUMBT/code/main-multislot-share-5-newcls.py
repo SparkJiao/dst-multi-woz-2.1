@@ -124,12 +124,13 @@ class Processor(DataProcessor):
                 ontology[slot].append("undefined")
             fp_ontology.close()
 
+            self.include_dialogue_list = []
             if config.domain_list is not None:
                 domain_list = json.load(open(config.domain_list, 'r'))
             else:
                 domain_list = None
+                self.include_dialogue_list = None
 
-            self.include_dialogue_list = []
             if not config.target_slot == 'all':
                 slot_idx = {'attraction': '0:1:2', 'hotel': '3:4:5:6:7:8:9:10:11:12',
                             'restaurant': '13:14:15:16:17:18:19', 'taxi': '20:21:22:23', 'train': '24:25:26:27:28:29'}
@@ -156,7 +157,7 @@ class Processor(DataProcessor):
                         break
                 # config.target_slot = ':'.join(target_slot)
 
-            self.include_dialogue_list = set(self.include_dialogue_list)
+            self.include_dialogue_list = set(self.include_dialogue_list) if self.include_dialogue_list else None
         else:
             raise NotImplementedError()
 
@@ -185,7 +186,8 @@ class Processor(DataProcessor):
 
         logger.info('Processor: target_slot')
         logger.info(self.target_slot)
-        logger.info(f'Include dialogue amount in total: {len(self.include_dialogue_list)}')
+        if self.include_dialogue_list:
+            logger.info(f'Include dialogue amount in total: {len(self.include_dialogue_list)}')
         logger.info(f'Will reverse input: {self.reverse}')
 
     def get_train_examples(self, data_dir, accumulation=False, train_file=None):
@@ -221,7 +223,7 @@ class Processor(DataProcessor):
         prev_dialogue_index = None
         examples = []
         for (i, line) in enumerate(lines):
-            if line[0] not in self.include_dialogue_list:
+            if self.include_dialogue_list and line[0] not in self.include_dialogue_list:
                 continue
             guid = "%s-%s-%s" % (set_type, line[0], line[1])  # line[0]: dialogue index, line[1]: turn index
             if accumulation:
@@ -1106,6 +1108,8 @@ def main():
             model = DDP(model)
         elif n_gpu > 1:
             model = torch.nn.DataParallel(model)
+
+    # print(device)
 
     ###############################################################################
     # Training code

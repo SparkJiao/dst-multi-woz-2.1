@@ -653,16 +653,8 @@ def main():
     parser.add_argument('--extra_dropout', type=float, default=-1.)
     parser.add_argument('--reverse', default=False, action='store_true')
     parser.add_argument('--weighted_cls', default=False, action='store_true')
-    parser.add_argument('--use_flow', default=False, action='store_true')
-    parser.add_argument('--flow_layer', default=100, type=int)
-    parser.add_argument('--flow_head', default=None, type=int)
-    parser.add_argument('--hie_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--hie_residual', default=False, action='store_true')
     parser.add_argument('--hie_add_sup', default=0., type=float)
     parser.add_argument('--max_grad_norm', default=1.0, type=float)
-    parser.add_argument('--hie_wd_residual', default=False, action='store_true')
-    parser.add_argument('--hie_wd_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--hie_wd_add_output', default=False, action='store_true')
     parser.add_argument('--gate_type', default=0, type=int)
     parser.add_argument('--cls_loss_weight', default=1., type=float)
     parser.add_argument('--hidden_output', default=False, action='store_true')
@@ -679,34 +671,7 @@ def main():
 
     parser.add_argument('--extra_nbt', default=False, action='store_true')
     parser.add_argument('--extra_nbt_attn_head', default=6, type=int)
-    parser.add_argument('--graph_add_sup', default=0., type=float)
-    parser.add_argument('--graph_value_sup', default=0., type=float)
-    parser.add_argument('--graph_attn_head', default=1, type=int)
-    parser.add_argument('--graph_add_output', default=False, action='store_true')
-    parser.add_argument('--graph_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--graph_add_residual', default=False, action='store_true')
-    parser.add_argument('--graph_hard_attn', default=False, action='store_true')
-    parser.add_argument('--use_rl', default=False, action='store_true')
-    parser.add_argument('--value_attn_head', default=1, type=int)
-    parser.add_argument('--value_attn_output', default=False, action='store_true')
-    parser.add_argument('--value_attn_layer_norm', default=False, action='store_true')
-    parser.add_argument('--value_attn_residual', default=False, action='store_true')
 
-    parser.add_argument('--detach', default=False, action='store_true')
-
-    parser.add_argument('--override_attn_extra', default=False, action='store_true')
-    parser.add_argument('--fusion_no_transform', default=False, action='store_true')
-    parser.add_argument('--fusion_act_fn', default='gelu', type=str)
-
-    parser.add_argument('--context_agg', default=False, action='store_true')
-    parser.add_argument('--context_agg_fusion', default=False, action='store_true')
-    parser.add_argument('--fuse_type', default=0, type=int)
-    parser.add_argument('--diag_attn_hidden_scale', default=2.0, type=float)
-    parser.add_argument('--diag_attn_act', default=None, type=str)
-    parser.add_argument('--diag_attn_act_fn', default='relu', type=str)
-
-    parser.add_argument('--context_add_layer_norm', default=False, action='store_true')
-    parser.add_argument('--context_add_residual', default=False, action='store_true')
     parser.add_argument('--ff_hidden_size', type=int, default=1536)
     parser.add_argument('--ff_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--ff_add_residual', default=False, action='store_true')
@@ -714,10 +679,7 @@ def main():
     parser.add_argument('--query_residual', default=False, action='store_true')
     parser.add_argument('--context_override_attn', default=False, action='store_true')
 
-    parser.add_argument('--multi_view_diag_attn_hidden_scale', default=1.0, type=float)
-
     parser.add_argument('--value_embedding_type', default='cls', type=str)
-    parser.add_argument('--sa_fuse_act_fn', default='gelu', type=str)
     parser.add_argument('--transfer_sup', default=0, type=float)
     parser.add_argument('--save_gate', default=False, action='store_true')
     parser.add_argument('--slot_res', default=None, type=str)
@@ -726,10 +688,6 @@ def main():
     parser.add_argument('--add_relu', default=False, action='store_true')
     parser.add_argument('--add_weight', default=False, action='store_true')
     parser.add_argument('--num_layers', default=0, type=int)
-    parser.add_argument('--hop_update_self', default=False, action='store_true')
-    parser.add_argument('--graph_attn_type', default=0, type=int)
-    parser.add_argument('--graph_dropout', default=0.1, type=float)
-    parser.add_argument('--sa_act_1', default=None, type=str)
 
     parser.add_argument('--sa_fuse_type', default='gate', type=str)
     parser.add_argument('--fuse_add_layer_norm', default=False, action='store_true')
@@ -880,6 +838,8 @@ def main():
         from cls_aug_transformer import BeliefTracker
     elif args.nbt == 'graph2_p':
         from cls_graph2p_distill import BeliefTracker
+    elif args.nbt == 'flat':
+        from cls_transformer_flat import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -1029,11 +989,11 @@ def main():
                         summary_writer.add_scalar("Train/JointAcc", acc, global_step)
                         summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
                         if n_gpu == 1:
-                            for i, slot in enumerate(processor.target_slot):
-                                summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
-                                                          global_step)
-                                summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
-                                                          global_step)
+                            # for i, slot in enumerate(processor.target_slot):
+                            #     summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
+                            #                               global_step)
+                            #     summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
+                            #                               global_step)
                             if hasattr(model, "get_metric"):
                                 metric = model.get_metric(reset=False)
                                 for k, v in metric.items():
@@ -1113,13 +1073,13 @@ def main():
                             summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
                             summary_writer.add_scalar("Validate/Cls_Acc", dev_type_acc, global_step)
                             if n_gpu == 1:
-                                for i, slot in enumerate(processor.target_slot):
-                                    summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
-                                                              dev_loss_slot[i] / all_input_ids_dev.size(0), global_step)
-                                    summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i],
-                                                              global_step)
-                                    summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
-                                                              global_step)
+                                # for i, slot in enumerate(processor.target_slot):
+                                #     summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
+                                #                               dev_loss_slot[i] / all_input_ids_dev.size(0), global_step)
+                                #     summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i],
+                                #                               global_step)
+                                #     summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
+                                #                               global_step)
                                 if hasattr(model, "get_metric"):
                                     metric = model.get_metric(reset=True)
                                     for k, v in metric.items():
