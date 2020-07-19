@@ -74,6 +74,7 @@ class BeliefTracker(nn.Module):
         # NBT
         nbt_config = copy.deepcopy(self.sv_encoder.config)
         nbt_config.num_hidden_layers = args.num_layers
+        nbt_config.intermediate_size = args.intermediate_size
         self.nbt_config = nbt_config
 
         self.position_embedding = self.utterance_encoder.bert.embeddings.position_embeddings

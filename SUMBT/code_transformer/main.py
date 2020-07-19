@@ -688,6 +688,7 @@ def main():
     parser.add_argument('--add_relu', default=False, action='store_true')
     parser.add_argument('--add_weight', default=False, action='store_true')
     parser.add_argument('--num_layers', default=0, type=int)
+    parser.add_argument('--intermediate_size', default=3072, type=int)
 
     parser.add_argument('--sa_fuse_type', default='gate', type=str)
     parser.add_argument('--fuse_add_layer_norm', default=False, action='store_true')
@@ -1133,7 +1134,7 @@ def main():
                         if last_update + args.patience * args.per_eval_steps <= global_step:
                             break
 
-            if last_update + args.patience * args.per_eval_steps <= global_step:
+            if last_update and last_update + args.patience * args.per_eval_steps <= global_step:
                 break
 
     ###############################################################################
