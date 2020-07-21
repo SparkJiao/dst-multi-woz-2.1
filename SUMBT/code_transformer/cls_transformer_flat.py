@@ -32,8 +32,8 @@ class BertForUtteranceEncoding(BertPreTrainedModel):
         self.config = config
         self.bert = BertModel(config)
 
-    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, head_mask=None, inputs_embeds=None):
-        return self.bert(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, head_mask=head_mask,
+    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None, inputs_embeds=None):
+        return self.bert(input_ids=input_ids, token_type_ids=token_type_ids, position_ids=position_ids, attention_mask=attention_mask, head_mask=head_mask,
                          inputs_embeds=inputs_embeds)
 
 
@@ -87,7 +87,10 @@ class BeliefTracker(nn.Module):
             self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
                                             nn.Tanh(),
                                             nn.Linear(self.bert_output_dim, 3))
-        self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim, bias=False)
+        if args.distance_metric == 'product':
+            self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim, bias=False)
+        else:
+            self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim)
 
         # Measure
         self.distance_metric = args.distance_metric
@@ -131,6 +134,11 @@ class BeliefTracker(nn.Module):
         slot_to_slot_mask = slot_to_slot_mask.unsqueeze(1).expand(-1, slot_len, -1, -1).reshape(slot_dim * slot_len, slot_dim * slot_len)
         seq_to_slot_mask = torch.zeros((self.max_seq_length, slot_len * slot_dim), dtype=torch.long, device=self.device)
 
+        utt_pos_ids = torch.arange(self.max_seq_length, device=self.device, dtype=torch.long)
+        slot_pos_ids = self.max_seq_length + torch.arange(self.max_slot_length, device=self.device, dtype=torch.long)
+        slot_pos_ids = slot_pos_ids.unsqueeze(0).repeat(slot_dim, 1).reshape(slot_dim * self.max_slot_length)
+        pos_ids = torch.cat([utt_pos_ids, slot_pos_ids], dim=-1)
+        
         self.register_buffer("slot_ids", slot_ids)
         if slot_token_type_ids is None:
             slot_token_type_ids = slot_ids.new_zeros(slot_ids.size())
@@ -138,6 +146,7 @@ class BeliefTracker(nn.Module):
         self.register_buffer("slot_mask", slot_mask.to(dtype=torch.long))
         self.register_buffer("slot_to_slot_mask", slot_to_slot_mask.to(dtype=torch.long, device=self.device))
         self.register_buffer("seq_to_slot_mask", seq_to_slot_mask)
+        self.register_buffer("pos_ids", pos_ids)
 
         max_value_num = 0
         value_list = []
@@ -207,9 +216,10 @@ class BeliefTracker(nn.Module):
             bs, -1, -1).reshape(bs, slot_dim * self.max_slot_length)], dim=1)
         token_type_ids = torch.cat([token_type_ids.view(-1, self.max_seq_length), self.slot_token_type_ids.unsqueeze(0).expand(
             bs, -1, -1).reshape(bs, -1)], dim=1)
+        pos_ids = self.pos_ids.unsqueeze(0).expand(bs, -1).contiguous()
 
         # Utterance encoding
-        output = self.utterance_encoder(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
+        output = self.utterance_encoder(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, position_ids=pos_ids)
         slot_hidden = output[0][:, self.max_seq_length:]
         slot_hidden = slot_hidden.view(bs, slot_dim, self.max_slot_length, self.bert_output_dim)
         slot_h = slot_hidden[:, :, 0].view(ds, ts, slot_dim, -1).transpose(1, 2).reshape(ds * slot_dim, ts, -1)
@@ -249,7 +259,9 @@ class BeliefTracker(nn.Module):
             _hidden = hidden.reshape(slot_dim * ds * ts, 1, -1)
             _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(slot_dim, ds, ts, num_slot_labels)
         else:
-            _dist = None
+            _hid_label = hid_label.unsqueeze(1).unsqueeze(1).repeat(1, ds, ts, 1, 1).view(slot_dim * ds * ts * num_slot_labels, -1)
+            _hidden = hidden.unsqueeze(3).repeat(1, 1, 1, num_slot_labels, 1).reshape(slot_dim * ds * ts * num_slot_labels, -1)
+            _dist = self.metric(_hid_label, _hidden).view(slot_dim, ds, ts, num_slot_labels)
 
         if self.distance_metric == 'euclidean':
             _dist = -_dist
