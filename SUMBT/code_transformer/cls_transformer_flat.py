@@ -364,7 +364,7 @@ class BeliefTracker(nn.Module):
             return loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, torch.cat(
                 [answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1)
         else:
-            return loss.unsqueeze(0), None, acc.unsqueeze(0), type_acc.unusqueeze(0), acc_slot.unsqueeze(0), type_acc_slot.unsqueeze(
+            return loss.unsqueeze(0), None, acc.unsqueeze(0), type_acc.unsqueeze(0), acc_slot.unsqueeze(0), type_acc_slot.unsqueeze(
                 0), torch.cat([answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1).unsqueeze(0)
 
     @staticmethod
