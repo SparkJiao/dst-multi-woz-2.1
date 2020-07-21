@@ -10,7 +10,7 @@ import time
 import numpy as np
 import torch
 from torch.nn import Parameter
-from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 from transformers import AdamW, AutoTokenizer, get_linear_schedule_with_warmup, tokenization_roberta, tokenization_distilbert
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
 
-    def __init__(self, guid, text_a, text_b=None, label=None):
+    def __init__(self, guid, text_a, text_b=None, label=None, update=None):
         """Constructs a InputExample.
 
         Args:
@@ -47,16 +47,17 @@ class InputExample(object):
         self.text_a = text_a
         self.text_b = text_b
         self.label = label
+        self.update = update
 
 
 class InputFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, input_len, answer_type, label_id):
+    def __init__(self, input_ids, input_len, label_id, update):
         self.input_ids = input_ids
         self.input_len = input_len
-        self.answer_type = answer_type
         self.label_id = label_id
+        self.update = update
 
 
 class DataProcessor(object):
@@ -107,8 +108,7 @@ class Processor(DataProcessor):
             fp_ontology.close()
 
         # MultiWOZ dataset
-        elif config.data_dir == "data/multiwoz2.1_5":
-
+        elif "data/multiwoz" in config.data_dir:
             if config.ontology is None:
                 fp_ontology = open(os.path.join(config.data_dir, "ontology.json"), "r")
             else:
@@ -117,8 +117,10 @@ class Processor(DataProcessor):
             ontology = json.load(fp_ontology)
             for slot in ontology.keys():
                 # ontology[slot].append("none")
-                """ Pop all 'none' and 'do not care' values """
-                ontology[slot] = [x for x in ontology[slot] if x not in ["none", "do not care"]]
+                # """ Pop all 'none' and 'do not care' values """
+                # ontology[slot] = [x for x in ontology[slot] if x not in ["none", "do not care"]]
+                if 'none' not in ontology[slot]:
+                    ontology[slot].append('none')
 
                 """ FIX_UNDEFINED: Add undefined value. """
                 ontology[slot].append("undefined")
@@ -151,6 +153,7 @@ class Processor(DataProcessor):
 
         # select slots to train
         nslots = len(ontology.keys())
+        self.nslots = nslots
         target_slot = list(ontology.keys())
         if config.target_slot == 'all' and config.train_single == 'all':
             self.target_slot_idx = [*range(0, nslots)]
@@ -224,9 +227,10 @@ class Processor(DataProcessor):
                     text_a, text_b = text_b, text_a
 
             label = [line[4 + idx] for idx in self.target_slot_idx]
+            update = [line[4 + self.nslots + idx] for idx in self.target_slot_idx]
 
             examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label, update=update))
         return examples
 
 
@@ -234,8 +238,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     """Loads a data file into a list of `InputBatch`s."""
 
     label_map = [{label: i for i, label in enumerate(labels)} for labels in label_list]
-    for labels in label_map:
-        assert 'none' not in labels and 'do not care' not in labels
+    # for labels in label_map:
+    #     assert 'none' not in labels and 'do not care' not in labels
     slot_dim = len(label_list)
 
     features = []
@@ -303,33 +307,14 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         assert len(input_ids) == max_seq_length
 
         label_id = []
-        answer_type = []
         label_info = 'label: '
-        answer_type_info = 'answer type: '
         for i, label in enumerate(example.label):
             if label == 'dontcare':
-                # label = 'do not care'
                 raise RuntimeError()
             if label == 'undefined':
                 undefined += 1
-            if label == 'none':
-                answer_type.append(0)
-                label_id.append(-1)
-                answer_type_info += '%s (id = %d) ' % ('none', 0)
-                label_info += 'None '
-                none_values += 1
-            elif label == 'do not care':
-                answer_type.append(1)
-                label_id.append(-1)
-                answer_type_info += '%s (id = %d) ' % ('do not care', 1)
-                label_info += 'None '
-                care_values += 1
-            else:
-                answer_type.append(2)
-                label_id.append(label_map[i][label])
-                answer_type_info += 'pick (id = 2) '
-                label_info += '%s (id = %d) ' % (label, label_map[i][label])
-                ptr_values += 1
+            label_id.append(label_map[i][label])
+            label_info += '%s (id = %d) ' % (label, label_map[i][label])
 
         if ex_index < 5:
             logger.info("*** Example ***")
@@ -339,7 +324,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
             logger.info("input_len: %s" % " ".join([str(x) for x in input_len]))
             logger.info("label: " + label_info)
-            logger.info("answer type: " + answer_type_info)
 
         curr_dialogue_idx = example.guid.split('-')[1]
         curr_turn_idx = int(example.guid.split('-')[2])
@@ -348,7 +332,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             if prev_turn_idx < max_turn_length:
                 features += [InputFeatures(input_ids=all_padding,
                                            input_len=all_padding_len,
-                                           answer_type=[-1] * slot_dim,
+                                           update=[-1] * slot_dim,
                                            label_id=[-1] * slot_dim)] * (max_turn_length - prev_turn_idx - 1)
             assert len(features) % max_turn_length == 0
 
@@ -357,7 +341,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
                 InputFeatures(input_ids=input_ids,
                               input_len=input_len,
                               label_id=label_id,
-                              answer_type=answer_type))
+                              update=list(map(int, example.update))))
 
         prev_dialogue_idx = curr_dialogue_idx
         prev_turn_idx = curr_turn_idx
@@ -365,28 +349,24 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     if prev_turn_idx < max_turn_length:
         features += [InputFeatures(input_ids=all_padding,
                                    input_len=all_padding_len,
-                                   answer_type=[-1] * slot_dim,
-                                   label_id=[-1] * slot_dim), ] * (max_turn_length - prev_turn_idx - 1)
+                                   update=[-1] * slot_dim,
+                                   label_id=[-1] * slot_dim)] * (max_turn_length - prev_turn_idx - 1)
     assert len(features) % max_turn_length == 0
 
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_len = torch.tensor([f.input_len for f in features], dtype=torch.long)
-    all_answer_type_ids = torch.tensor([f.answer_type for f in features], dtype=torch.long)
     all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.long)
+    all_update = torch.tensor([f.update for f in features], dtype=torch.long)
 
     # reshape tensors to [#batch, #max_turn_length, #max_seq_length]
     all_input_ids = all_input_ids.view(-1, max_turn_length, max_seq_length)
     all_input_len = all_input_len.view(-1, max_turn_length, 2)
-    all_answer_type_ids = all_answer_type_ids.view(-1, max_turn_length, slot_dim)
     all_label_ids = all_label_ids.view(-1, max_turn_length, slot_dim)
+    all_update = all_update.view(-1, max_turn_length, slot_dim)
 
     logger.info(f"There are {undefined} undefined values in total.")
-    logger.info(f"Answer types:")
-    logger.info(f"None: {none_values}")
-    logger.info(f"Do not care: {care_values}")
-    logger.info(f"PICK: {ptr_values}")
 
-    return all_input_ids, all_input_len, all_answer_type_ids, all_label_ids
+    return all_input_ids, all_input_len, all_label_ids, all_update
 
 
 def get_label_embedding(labels, max_seq_length, tokenizer, device):
@@ -754,6 +734,9 @@ def main():
     torch.manual_seed(args.seed)
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
     ###############################################################################
     # Load data
@@ -784,7 +767,7 @@ def main():
         dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation, dev_file=args.dev_file)
 
         ## Training utterances
-        all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
+        all_input_ids, all_input_len, all_label_ids, all_update = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
 
@@ -799,18 +782,17 @@ def main():
 
         # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
 
-        train_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
-                                   all_label_ids)
+        train_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_label_ids, all_update)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
             train_sampler = DistributedSampler(train_data)
 
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size,
-                                      pin_memory=True, num_workers=4)
+                                      pin_memory=True, num_workers=16)
 
         ## Dev utterances
-        all_input_ids_dev, all_input_len_dev, all_answer_type_ids_dev, all_label_ids_dev = convert_examples_to_features(
+        all_input_ids_dev, all_input_len_dev, all_label_ids_dev, all_update_dev = convert_examples_to_features(
             dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids_dev, all_input_mask_dev = make_aux_tensors(all_input_ids_dev, all_input_len_dev)
         num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
@@ -824,9 +806,9 @@ def main():
         #     all_input_ids_dev.to(device), all_input_len_dev.to(device), all_label_ids_dev.to(device)
 
         dev_data = TensorDataset(all_input_ids_dev,
-                                 all_token_type_ids_dev, all_input_mask_dev, all_answer_type_ids_dev, all_label_ids_dev)
+                                 all_token_type_ids_dev, all_input_mask_dev, all_label_ids_dev, all_update_dev)
         dev_sampler = SequentialSampler(dev_data)
-        dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
+        dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size, num_workers=8)
 
     logger.info("Loaded data!")
 
@@ -841,8 +823,6 @@ def main():
         from cls_graph2p_distill import BeliefTracker
     elif args.nbt == 'flat':
         from cls_transformer_flat import BeliefTracker
-    elif args.nbt == 'query':
-        from cls_query_transformer import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -857,7 +837,6 @@ def main():
     # if args.fp16:
     #     model.half()
     model.to(device)
-    # model.to(torch.device('cuda:0'))
 
     ## Get slot-value embeddings
     label_token_ids, label_len = [], []
@@ -872,8 +851,6 @@ def main():
 
     ## Initialize slot and value embeddings
     model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
-    # model.to(torch.device('cpu'))
-    # model.to(device)
 
     # Prepare optimizer
     if args.do_train:
@@ -885,8 +862,10 @@ def main():
                 {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
             ]
             return optimizer_grouped_parameters
-
-        optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
+        if n_gpu == 1:
+            optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
+        else:
+            optimizer_grouped_parameters = get_optimizer_grouped_parameters(model.module)
 
         t_total = num_train_steps
 
@@ -947,16 +926,17 @@ def main():
                 model.train()
 
                 batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-                input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
+                input_ids, token_type_ids, input_mask, label_ids, update = batch
 
                 # Forward
                 # with torch.autograd.set_detect_anomaly(True):
+                loss, loss_slot, acc, acc_slot, _, tup = model(input_ids, token_type_ids, input_mask, label_ids, update)
                 if n_gpu == 1:
-                    loss, loss_slot, acc, _, acc_slot, _, _ = \
-                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                    loss, loss_slot, acc, acc_slot, _, _ = \
+                        model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
                 else:
-                    loss, _, acc, _, acc_slot, _, _ = \
-                        model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                    loss, _, acc, acc_slot, _, _ = \
+                        model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
 
                     # average to multi-gpus
                     loss = loss.mean()
@@ -995,11 +975,6 @@ def main():
                         summary_writer.add_scalar("Train/JointAcc", acc, global_step)
                         summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
                         if n_gpu == 1:
-                            # for i, slot in enumerate(processor.target_slot):
-                            #     summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
-                            #                               global_step)
-                            #     summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
-                            #                               global_step)
                             if hasattr(model, "get_metric"):
                                 metric = model.get_metric(reset=False)
                                 for k, v in metric.items():
@@ -1011,47 +986,44 @@ def main():
                         model.eval()
                         dev_loss = 0
                         dev_acc = 0
-                        dev_type_acc = 0
                         dev_loss_slot, dev_acc_slot, dev_acc_slot_type = None, None, None
                         nb_dev_examples, nb_dev_steps = 0, 0
 
                         for _, eval_batch in enumerate(tqdm(dev_dataloader, desc="Validation", dynamic_ncols=True)):
                             eval_batch = tuple(t.to(device) for t in eval_batch)
-                            input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = eval_batch
+                            input_ids, token_type_ids, input_mask, label_ids, update = eval_batch
                             batch_size = input_ids.size(0)
                             if input_ids.dim() == 2:
                                 input_ids = input_ids.unsqueeze(0)
                                 token_type_ids = token_type_ids.unsqueeze(0)
                                 input_mask = input_mask.unsqueeze(0)
-                                answer_type_ids = answer_type_ids.unsqueeze(0)
                                 label_ids = label_ids.unsuqeeze(0)
+                                update = update.unsqueeze(0)
 
                             with torch.no_grad():
+                                loss, loss_slot, acc, acc_slot, pred_slot, tup = model(input_ids, token_type_ids, input_mask, label_ids, update)
                                 if n_gpu == 1:
-                                    loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, _ \
-                                        = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                                    loss, loss_slot, acc, acc_slot, type_acc_slot, _ \
+                                        = model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
                                 else:
-                                    loss, _, acc, type_acc, acc_slot, type_acc_slot, _ \
-                                        = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
-
+                                    loss, _, acc, acc_slot, type_acc_slot, _ \
+                                        = model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
+                                if n_gpu > 1:
                                     # average to multi-gpus
                                     loss = loss.mean()
                                     acc = acc.mean()
                                     acc_slot = acc_slot.mean(0)
 
-                            num_valid_turn = torch.sum(answer_type_ids[:, :, 0].view(-1) > -1,
-                                                       0).item()  # valid turns for all current batch
+                            num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()
                             # dev_loss += loss.item() * num_valid_turn
                             dev_acc += acc.item() * num_valid_turn
                             dev_loss += loss.item() * batch_size
-                            dev_type_acc += type_acc.item() * num_valid_turn
                             # dev_acc += acc.item()
 
                             if n_gpu == 1:
                                 if dev_loss_slot is None:
                                     # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
                                     dev_acc_slot = acc_slot * num_valid_turn
-                                    dev_acc_slot_type = type_acc_slot * num_valid_turn
                                     dev_loss_slot = [l * batch_size for l in loss_slot]
                                     # dev_acc_slot = acc_slot
                                 else:
@@ -1059,7 +1031,6 @@ def main():
                                         # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
                                         dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
                                     dev_acc_slot += acc_slot * num_valid_turn
-                                    dev_acc_slot_type += type_acc_slot * num_valid_turn
                                     # dev_acc_slot += acc_slot
 
                             nb_dev_examples += num_valid_turn
@@ -1067,25 +1038,15 @@ def main():
                         # dev_loss = dev_loss / nb_dev_examples
                         dev_loss = dev_loss / all_input_ids_dev.size(0)
                         dev_acc = dev_acc / nb_dev_examples
-                        dev_type_acc = dev_type_acc / nb_dev_examples
 
                         if n_gpu == 1:
                             dev_acc_slot = dev_acc_slot / nb_dev_examples
-                            dev_acc_slot_type = dev_acc_slot_type / nb_dev_examples
 
                         # tensorboard logging
                         if summary_writer is not None:
                             summary_writer.add_scalar("Validate/Loss", dev_loss, global_step)
                             summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
-                            summary_writer.add_scalar("Validate/Cls_Acc", dev_type_acc, global_step)
                             if n_gpu == 1:
-                                # for i, slot in enumerate(processor.target_slot):
-                                #     summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
-                                #                               dev_loss_slot[i] / all_input_ids_dev.size(0), global_step)
-                                #     summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i],
-                                #                               global_step)
-                                #     summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
-                                #                               global_step)
                                 if hasattr(model, "get_metric"):
                                     metric = model.get_metric(reset=True)
                                     for k, v in metric.items():
@@ -1188,7 +1149,7 @@ def main():
 
             eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation,
                                                         test_file=args.test_file)
-            all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
+            all_input_ids, all_input_len, all_label_ids, all_update = convert_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
             all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
             # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device),
@@ -1197,8 +1158,8 @@ def main():
             logger.info("  Num examples = %d", len(eval_examples))
             logger.info("  Batch size = %d", args.eval_batch_size)
 
-            eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
-                                      all_label_ids)
+            eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask,
+                                      all_label_ids, all_update)
 
             # Run prediction for full data
             eval_sampler = SequentialSampler(eval_data)
@@ -1209,16 +1170,11 @@ def main():
             eval_loss_slot, eval_acc_slot = None, None
             nb_eval_steps, nb_eval_examples = 0, 0
 
-            accuracies = {'joint5': 0, 'joint_type5': 0, 'slot5': 0, 'slot_type5': 0, 'num_slot5': 0, 'num_turn': 0,
-                          'joint_rest': 0, 'joint_type_rest': 0, 'slot_rest': 0, 'slot_type_rest': 0,
-                          'num_slot_rest': 0,
-                          'joint_taxi': 0, 'joint_type_taxi': 0, 'slot_taxi': 0, 'slot_type_taxi': 0,
-                          'num_slot_taxi': 0,
-                          'joint_hotel': 0, 'joint_type_hotel': 0, 'slot_hotel': 0, 'slot_type_hotel': 0,
-                          'num_slot_hotel': 0,
-                          'joint_attraction': 0, 'joint_type_attraction': 0, 'slot_attraction': 0,
-                          'slot_type_attraction': 0,
-                          'num_slot_attraction': 0,
+            accuracies = {'joint5': 0, 'slot5': 0, 'num_slot5': 0, 'num_turn': 0,
+                          'joint_rest': 0, 'slot_rest': 0, 'num_slot_rest': 0,
+                          'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0,
+                          'joint_hotel': 0, 'slot_hotel': 0, 'num_slot_hotel': 0,
+                          'joint_attraction': 0, 'slot_attraction': 0, 'num_slot_attraction': 0,
                           'joint_train': 0, 'joint_type_train': 0, 'slot_train': 0, 'slot_type_train': 0,
                           'num_slot_train': 0}
             predictions = []
