@@ -207,10 +207,9 @@ for file_id in tqdm(data, total=len(data)):
             for domain in sorted(ontology.keys()):
                 for slot in sorted(ontology[domain].keys()):
                     key = str(domain) + '-' + str(slot)
-                    if key in belief:
-                        fp_out.write('\t' + belief[key])
-                    else:
-                        fp_out.write('\tnone')
+                    if key not in belief:
+                        belief[key] = 'none'
+                    fp_out.write('\t' + belief[key])
             # record state transition labels
             for domain in sorted(ontology.keys()):
                 for slot in sorted(ontology[domain].keys()):

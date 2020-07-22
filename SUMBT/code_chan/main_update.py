@@ -823,6 +823,8 @@ def main():
         from cls_graph2p_distill import BeliefTracker
     elif args.nbt == 'flat':
         from cls_transformer_flat import BeliefTracker
+    elif args.nbt == 'query':
+        from cls_query_transformer import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -930,18 +932,16 @@ def main():
 
                 # Forward
                 # with torch.autograd.set_detect_anomaly(True):
-                loss, loss_slot, acc, acc_slot, _, tup = model(input_ids, token_type_ids, input_mask, label_ids, update)
                 if n_gpu == 1:
-                    loss, loss_slot, acc, acc_slot, _, _ = \
+                    loss, loss_slot, acc, acc_slot, _ = \
                         model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
                 else:
-                    loss, _, acc, acc_slot, _, _ = \
+                    loss, _, acc, acc_slot, _ = \
                         model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
 
                     # average to multi-gpus
                     loss = loss.mean()
                     acc = acc.mean()
-                    acc_slot = acc_slot.mean(0)
 
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
@@ -1001,12 +1001,11 @@ def main():
                                 update = update.unsqueeze(0)
 
                             with torch.no_grad():
-                                loss, loss_slot, acc, acc_slot, pred_slot, tup = model(input_ids, token_type_ids, input_mask, label_ids, update)
                                 if n_gpu == 1:
-                                    loss, loss_slot, acc, acc_slot, type_acc_slot, _ \
+                                    loss, loss_slot, acc, acc_slot, pred_slot \
                                         = model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
                                 else:
-                                    loss, _, acc, acc_slot, type_acc_slot, _ \
+                                    loss, _, acc, acc_slot, pred_slot \
                                         = model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
                                 if n_gpu > 1:
                                     # average to multi-gpus
@@ -1015,28 +1014,28 @@ def main():
                                     acc_slot = acc_slot.mean(0)
 
                             num_valid_turn = torch.sum(label_ids[:, :, 0].view(-1) > -1, 0).item()
-                            # dev_loss += loss.item() * num_valid_turn
+                            dev_loss += loss.item() * num_valid_turn
                             dev_acc += acc.item() * num_valid_turn
-                            dev_loss += loss.item() * batch_size
+                            # dev_loss += loss.item() * batch_size  # gradient overflow
                             # dev_acc += acc.item()
 
                             if n_gpu == 1:
                                 if dev_loss_slot is None:
-                                    # dev_loss_slot = [l * num_valid_turn for l in loss_slot]
+                                    dev_loss_slot = [l * num_valid_turn for l in loss_slot]
                                     dev_acc_slot = acc_slot * num_valid_turn
-                                    dev_loss_slot = [l * batch_size for l in loss_slot]
+                                    # dev_loss_slot = [l * batch_size for l in loss_slot]
                                     # dev_acc_slot = acc_slot
                                 else:
                                     for i, l in enumerate(loss_slot):
-                                        # dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
-                                        dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
+                                        dev_loss_slot[i] = dev_loss_slot[i] + l * num_valid_turn
+                                        # dev_loss_slot[i] = dev_loss_slot[i] + l * batch_size
                                     dev_acc_slot += acc_slot * num_valid_turn
                                     # dev_acc_slot += acc_slot
 
                             nb_dev_examples += num_valid_turn
 
-                        # dev_loss = dev_loss / nb_dev_examples
-                        dev_loss = dev_loss / all_input_ids_dev.size(0)
+                        dev_loss = dev_loss / nb_dev_examples
+                        # dev_loss = dev_loss / all_input_ids_dev.size(0)
                         dev_acc = dev_acc / nb_dev_examples
 
                         if n_gpu == 1:
@@ -1175,42 +1174,41 @@ def main():
                           'joint_taxi': 0, 'slot_taxi': 0, 'num_slot_taxi': 0,
                           'joint_hotel': 0, 'slot_hotel': 0, 'num_slot_hotel': 0,
                           'joint_attraction': 0, 'slot_attraction': 0, 'num_slot_attraction': 0,
-                          'joint_train': 0, 'joint_type_train': 0, 'slot_train': 0, 'slot_type_train': 0,
-                          'num_slot_train': 0}
+                          'joint_train': 0, 'slot_train': 0, 'num_slot_train': 0}
             predictions = []
 
-            for input_ids, token_type_ids, input_mask, answer_type_ids, label_ids in tqdm(eval_dataloader,
+            for input_ids, token_type_ids, input_mask, label_ids, update in tqdm(eval_dataloader,
                                                                                           desc="Evaluating"):
                 input_ids = input_ids.to(device)
                 token_type_ids = token_type_ids.to(device)
                 input_mask = input_mask.to(device)
-                answer_type_ids = answer_type_ids.to(device)
+                update = update.to(device)
                 label_ids = label_ids.to(device)
                 if input_ids.dim() == 2:
                     input_ids = input_ids.unsqueeze(0)
                     token_type_ids = token_type_ids.unsqueeze(0)
                     input_mask = input_mask.unsqueeze(0)
-                    answer_type_ids = answer_type_ids.unsqueeze(0)
+                    update = update.unsqueeze(0)
                     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
                     if n_gpu == 1:
-                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        loss, loss_slot, acc, acc_slot, pred_slot \
+                            = model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
                     else:
-                        loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        loss, _, acc, acc_slot, pred_slot \
+                            = model(input_ids, token_type_ids, input_mask, label_ids, update, n_gpu)
                         nbatch = label_ids.size(0)
                         nslot = pred_slot.size(3)
                         pred_slot = pred_slot.view(nbatch, -1, nslot)
 
-                accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
-                predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor,
+                accuracies = eval_all_accs(pred_slot, label_ids, accuracies)
+                predictions.extend(get_predictions(pred_slot, label_ids, processor,
                                                    gate=model.get_gate_metric(reset=True) if args.save_gate else None,
                                                    value_scores=model.get_value_scores(reset=True) if args.save_gate else None,
                                                    graph_scores=model.get_graph_scores(reset=True) if args.save_gate else None))
 
-                nb_eval_ex = (answer_type_ids[:, :, 0].view(-1) != -1).sum().item()
+                nb_eval_ex = (label_ids[:, :, 0].view(-1) != -1).sum().item()
                 nb_eval_examples += nb_eval_ex
                 nb_eval_steps += 1
 
@@ -1270,119 +1268,77 @@ def main():
             with open(os.path.join(predict_dir, "%s.txt" % out_file_name), 'w') as f:
                 f.write(
                     'joint acc (5 domain) : %.5f \t slot acc (5 domain) : %.5f \n'
-                    'joint acc type (5 domain) : %.5f \t slot acc type (5 domain) : %.5f \n'
 
                     'joint restaurant : %.5f \t slot acc restaurant : %.5f \n'
-                    'joint restaurant type : %.5f \t slot acc restaurant type : %.5f \n'
 
                     'joint taxi : %.5f \t slot acc taxi : %.5f \n'
-                    'joint taxi type : %.5f \t slot acc taxi type : %.5f \n'
 
                     'joint hotel : %.5f \t slot acc hotel : %.5f \n'
-                    'joint hotel type : %.5f \t slot acc hotel type : %.5f \n'
 
                     'joint attraction : %.5f \t slot acc attraction : %.5f \n'
-                    'joint attraction type : %.5f \t slot acc attraction type : %.5f \n'
 
-                    'joint train : %.5f \t slot acc train %.5f \n'
-                    'joint train type : %.5f \t slot acc train type %.5f \n' % (
+                    'joint train : %.5f \t slot acc train %.5f \n' % (
                         (accuracies['joint5'] / accuracies['num_turn']).item(),
                         (accuracies['slot5'] / accuracies['num_slot5']).item(),
-                        (accuracies['joint_type5'] / accuracies['num_turn']).item(),
-                        (accuracies['slot_type5'] / accuracies['num_slot5']).item(),
 
                         (accuracies['joint_rest'] / accuracies['num_turn']).item(),
                         (accuracies['slot_rest'] / accuracies['num_slot_rest']).item(),
-                        (accuracies['joint_type_rest'] / accuracies['num_turn']).item(),
-                        (accuracies['slot_type_rest'] / accuracies['num_slot_rest']).item(),
 
                         (accuracies['joint_taxi'] / accuracies['num_turn']).item(),
                         (accuracies['slot_taxi'] / accuracies['num_slot_taxi']).item(),
-                        (accuracies['joint_type_taxi'] / accuracies['num_turn']).item(),
-                        (accuracies['slot_type_taxi'] / accuracies['num_slot_taxi']).item(),
 
                         (accuracies['joint_hotel'] / accuracies['num_turn']).item(),
                         (accuracies['slot_hotel'] / accuracies['num_slot_hotel']).item(),
-                        (accuracies['joint_type_hotel'] / accuracies['num_turn']).item(),
-                        (accuracies['slot_type_hotel'] / accuracies['num_slot_hotel']).item(),
 
                         (accuracies['joint_attraction'] / accuracies['num_turn']).item(),
                         (accuracies['slot_attraction'] / accuracies['num_slot_attraction']).item(),
-                        (accuracies['joint_type_attraction'] / accuracies['num_turn']).item(),
-                        (accuracies['slot_type_attraction'] / accuracies['num_slot_attraction']).item(),
 
                         (accuracies['joint_train'] / accuracies['num_turn']).item(),
                         (accuracies['slot_train'] / accuracies['num_slot_train']).item(),
-                        (accuracies['joint_type_train'] / accuracies['num_turn']).item(),
-                        (accuracies['slot_type_train'] / accuracies['num_slot_train']).item()
                     ))
 
 
-def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
-    answer_type_pred = pred_slot[:, :, :, 0]
-    pred_slot = pred_slot[:, :, :, 1]
-
-    def _eval_acc(_answer_type_pred, _pred_slot, _answer_type_ids, _labels):
+def eval_all_accs(pred_slot, labels, accuracies):
+    def _eval_acc(_pred_slot, _labels):
         slot_dim = _labels.size(-1)
-        classify_mask = ((_answer_type_ids != -1) * (_answer_type_ids != 2)).view(-1, slot_dim)
-        value_accuracy = (_pred_slot == _labels).view(-1, slot_dim).masked_fill(classify_mask, 1)
-        answer_type_accuracy = (_answer_type_pred == _answer_type_ids).view(-1, slot_dim)
-        accuracy = value_accuracy * answer_type_accuracy
-        # accuracy = (_pred_slot == _labels).view(-1, slot_dim)
-        num_turn = torch.sum(_answer_type_ids[:, :, 0].view(-1) > -1, 0).float()
-        num_data = torch.sum(_answer_type_ids > -1).float()
+        accuracy = (_pred_slot == _labels).view(-1, slot_dim)
+        num_turn = torch.sum(_labels[:, :, 0].view(-1) > -1, 0).float()
+        num_data = torch.sum(_labels > -1).float()
         # joint accuracy
         joint_acc = sum(torch.sum(accuracy, 1) / slot_dim).float()
-        joint_acc_type = sum(torch.sum(answer_type_accuracy, dim=1) // slot_dim).float()
         # slot accuracy
         slot_acc = torch.sum(accuracy).float()
-        slot_acc_type = torch.sum(answer_type_accuracy).float()
-        return joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data
+        return joint_acc, slot_acc, num_turn, num_data
 
     if labels.size(-1) == 30:  # Full slots
         # restaurant domain
-        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-            answer_type_pred[:, :, 13:20], pred_slot[:, :, 13:20], answer_type_ids[:, :, 13:20], labels[:, :, 13:20])
+        joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 13:20], labels[:, :, 13:20])
         accuracies['joint_rest'] += joint_acc
-        accuracies['joint_type_rest'] += joint_acc_type
         accuracies['slot_rest'] += slot_acc
-        accuracies['slot_type_rest'] += slot_acc_type
         accuracies['num_slot_rest'] += num_data
 
         # taxi domain
-        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-            answer_type_pred[:, :, 20:24], pred_slot[:, :, 20:24], answer_type_ids[:, :, 20:24], labels[:, :, 20:24])
+        joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 20:24], labels[:, :, 20:24])
         accuracies['joint_taxi'] += joint_acc
-        accuracies['joint_type_taxi'] += joint_acc_type
         accuracies['slot_taxi'] += slot_acc
-        accuracies['slot_type_taxi'] += slot_acc_type
         accuracies['num_slot_taxi'] += num_data
 
         # attraction
-        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-            answer_type_pred[:, :, 0:3], pred_slot[:, :, 0:3], answer_type_ids[:, :, 0:3], labels[:, :, 0:3])
+        joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 0:3], labels[:, :, 0:3])
         accuracies['joint_attraction'] += joint_acc
-        accuracies['joint_type_attraction'] += joint_acc_type
         accuracies['slot_attraction'] += slot_acc
-        accuracies['slot_type_attraction'] += slot_acc_type
         accuracies['num_slot_attraction'] += num_data
 
         # hotel
-        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-            answer_type_pred[:, :, 3:13], pred_slot[:, :, 3:13], answer_type_ids[:, :, 3:13], labels[:, :, 3:13])
+        joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 3:13], labels[:, :, 3:13])
         accuracies['joint_hotel'] += joint_acc
-        accuracies['joint_type_hotel'] += joint_acc_type
         accuracies['slot_hotel'] += slot_acc
-        accuracies['slot_type_hotel'] += slot_acc_type
         accuracies['num_slot_hotel'] += num_data
 
         # train
-        joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-            answer_type_pred[:, :, 24:], pred_slot[:, :, 24:], answer_type_ids[:, :, 24:], labels[:, :, 24:])
+        joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:, :, 24:], labels[:, :, 24:])
         accuracies['joint_train'] += joint_acc
-        accuracies['joint_type_train'] += joint_acc_type
         accuracies['slot_train'] += slot_acc
-        accuracies['slot_type_train'] += slot_acc_type
         accuracies['num_slot_train'] += num_data
     else:
         accuracies['num_slot_rest'] = torch.tensor(1)
@@ -1392,31 +1348,24 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
         accuracies['num_slot_train'] = torch.tensor(1)
 
     # 5 domains (excluding bus and hotel domain)
-    joint_acc, joint_acc_type, slot_acc, slot_acc_type, num_turn, num_data = _eval_acc(
-        answer_type_pred, pred_slot, answer_type_ids, labels)
+    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot, labels)
     accuracies['num_turn'] += num_turn
     accuracies['joint5'] += joint_acc
-    accuracies['joint_type5'] += joint_acc_type
     accuracies['slot5'] += slot_acc
-    accuracies['slot_type5'] += slot_acc_type
     accuracies['num_slot5'] += num_data
 
     return accuracies
 
 
-def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor, gate=None,
+def get_predictions(pred_slots, labels, processor: Processor, gate=None,
                     value_scores=None, graph_scores=None):
     """
     :param pred_slots:
-    :param answer_type_ids:
     :param labels:
     :param processor:
     :param gate: [slot_dim, ds, ts - 1, 1]
     :return:
     """
-    answer_type_pred = pred_slots[:, :, :, 0]
-    pred_slots = pred_slots[:, :, :, 1]
-    type_vocab = ['none', 'do not care', 'value']
     predictions = []
     ds = pred_slots.size(0)
     ts = pred_slots.size(1)
@@ -1433,29 +1382,16 @@ def get_predictions(pred_slots, answer_type_ids, labels, processor: Processor, g
     for i in range(ds):
         dialog_pred = []
         for j in range(ts):
-            if answer_type_ids[i, j, 0] == -1:
+            if labels[i, j, 0] == -1:
                 break
             slot_pred = {}
             for slot_idx in range(slot_dim):
                 slot = processor.target_slot[slot_idx]
-                pred_answer_type = type_vocab[answer_type_pred[i, j, slot_idx]]
-                gold_answer_type = type_vocab[answer_type_ids[i, j, slot_idx]]
-                pred_label = -1 if pred_slots[i, j, slot_idx] == -1 else processor.ontology[slot][
-                    pred_slots[i][j][slot_idx]]
-                gold_label = -1 if labels[i, j, slot_idx] == -1 else processor.ontology[slot][labels[i][j][slot_idx]]
-                # dialog_pred.append({
-                #     "turn": j,
-                #     "slot": slot,
-                #     "predict_value": pred_label,
-                #     "gold_label": gold_label,
-                #     "pred_answer_type": pred_answer_type,
-                #     "gold_answer_type": gold_answer_type
-                # })
+                pred_label = processor.ontology[slot][pred_slots[i][j][slot_idx]]
+                gold_label = processor.ontology[slot][labels[i][j][slot_idx]]
                 slot_pred[slot] = {
                     "predict_value": pred_label,
                     "gold_label": gold_label,
-                    "predict_answer_type": pred_answer_type,
-                    "gold_answer_type": gold_answer_type
                 }
 
                 if gate is not None:
