@@ -71,6 +71,8 @@ class BeliefTracker(nn.Module):
         logger.info(f'Value vectors embedding type: {args.value_embedding_type}')
         self.value_embedding_type = args.value_embedding_type
         # self.value_lookup = nn.ModuleList([nn.Embedding(num_label, self.bert_output_dim) for num_label in num_labels])
+        self.defined_values = None
+        self.value_mask = None
 
         query_attn_config = copy.deepcopy(self.sv_encoder.config)
         query_attn_config.num_attention_heads = self.attn_head
@@ -167,8 +169,10 @@ class BeliefTracker(nn.Module):
             value_num = value.size(0)
             value_tensor[s, :value_num] = value
             value_mask[s, :value_num] = value.new_ones(value.size()[:-1], dtype=torch.long)
-        self.register_buffer("defined_values", value_tensor)
-        self.register_buffer("value_mask", value_mask)
+        # self.register_buffer("defined_values", value_tensor)
+        # self.register_buffer("value_mask", value_mask)
+        self.defined_values = value_tensor
+        self.value_mask = value_mask
 
         print("Complete initialization of slot and value lookup")
 
@@ -195,13 +199,14 @@ class BeliefTracker(nn.Module):
         ts = input_ids.size(1)  # turn size
         bs = ds * ts
         slot_dim = len(target_slot)
+        seq_length = input_ids.size(2)
 
         # print(update[0])
 
         # [bs, max_seq_length, h]
-        hidden = self.utterance_encoder(input_ids=input_ids.view(-1, self.max_seq_length),
-                                        token_type_ids=token_type_ids.view(-1, self.max_seq_length),
-                                        attention_mask=attention_mask.view(-1, self.max_seq_length))[0]
+        hidden = self.utterance_encoder(input_ids=input_ids.view(-1, seq_length),
+                                        token_type_ids=token_type_ids.view(-1, seq_length),
+                                        attention_mask=attention_mask.view(-1, seq_length))[0]
         # hidden = hidden.mul(hidden, attention_mask.view(-1, self.max_seq_length, 1).expand(hidden.size()))
         attention_mask = self.utterance_encoder.get_extended_attention_mask(attention_mask.view(bs, -1),
                                                                             (bs, slot_dim),
