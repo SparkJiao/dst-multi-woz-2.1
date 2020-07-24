@@ -1209,21 +1209,26 @@ def main():
                                                    graph_scores=model.get_graph_scores(reset=True) if args.save_gate else None))
 
                 nb_eval_ex = (label_ids[:, :, 0].view(-1) != -1).sum().item()
+                # batch_size = label_ids.size(0)
                 nb_eval_examples += nb_eval_ex
                 nb_eval_steps += 1
 
                 if n_gpu == 1:
                     eval_loss += loss.item() * nb_eval_ex
+                    # eval_loss += loss.item() * batch_size
                     eval_accuracy += acc.item() * nb_eval_ex
                     if eval_loss_slot is None:
                         eval_loss_slot = [l * nb_eval_ex for l in loss_slot]
+                        # eval_loss_slot = [l * batch_size for l in loss_slot]
                         eval_acc_slot = acc_slot * nb_eval_ex
                     else:
                         for i, l in enumerate(loss_slot):
+                            # eval_loss_slot[i] = eval_loss_slot[i] + l * batch_size
                             eval_loss_slot[i] = eval_loss_slot[i] + l * nb_eval_ex
                         eval_acc_slot += acc_slot * nb_eval_ex
                 else:
                     eval_loss += sum(loss) * nb_eval_ex
+                    # eval_loss += sum(loss) * batch_size
                     eval_accuracy += sum(acc) * nb_eval_ex
 
             eval_loss = eval_loss / nb_eval_examples

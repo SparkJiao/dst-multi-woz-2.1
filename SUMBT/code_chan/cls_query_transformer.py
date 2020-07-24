@@ -80,6 +80,7 @@ class BeliefTracker(nn.Module):
         nbt_config = copy.deepcopy(self.sv_encoder.config)
         nbt_config.num_hidden_layers = args.num_layers
         nbt_config.intermediate_size = args.intermediate_size
+        nbt_config.num_attention_heads = self.attn_head
         self.nbt_config = nbt_config
 
         self.position_embedding = self.utterance_encoder.bert.embeddings.position_embeddings
@@ -106,7 +107,7 @@ class BeliefTracker(nn.Module):
             self.metric = layers.ProductSimilarity(self.bert_output_dim)
 
         # Classifier
-        self.nll = CrossEntropyLoss(ignore_index=-1)
+        self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
@@ -195,6 +196,9 @@ class BeliefTracker(nn.Module):
         bs = ds * ts
         slot_dim = len(target_slot)
 
+        # print(update[0])
+
+        # [bs, max_seq_length, h]
         hidden = self.utterance_encoder(input_ids=input_ids.view(-1, self.max_seq_length),
                                         token_type_ids=token_type_ids.view(-1, self.max_seq_length),
                                         attention_mask=attention_mask.view(-1, self.max_seq_length))[0]
@@ -203,9 +207,10 @@ class BeliefTracker(nn.Module):
                                                                             (bs, slot_dim),
                                                                             device=hidden.device)
 
-        slot_hidden = self.slot_lookup.weight[target_slot, :]
-        expand_slot_hidden = slot_hidden.unsqueeze(0).expand(bs, -1, -1)
+        slot_hidden = self.slot_lookup.weight[target_slot, :]  # [slot_dim, h]
+        expand_slot_hidden = slot_hidden.unsqueeze(0).expand(bs, -1, -1)  # [bs, slot_dim, h]
 
+        # [bs, slot_dim, h]
         hidden = self.query_attn(expand_slot_hidden, hidden, hidden, attention_mask)[0]
         hidden_curr = hidden.view(ds, ts, slot_dim, -1).transpose(1, 2).reshape(ds * slot_dim, ts, -1)
 
@@ -222,8 +227,10 @@ class BeliefTracker(nn.Module):
         hidden = self.transformer(hidden, casual_mask,
                                   head_mask=self.utterance_encoder.get_head_mask(None,
                                                                                  self.nbt_config.num_hidden_layers))[0]
-        hidden = self.context_attn(slot_hidden.unsqueeze(0).expand(ds, -1, -1).reshape(ds * slot_dim, 1, -1),
+        # [ds * slot_dim, ts, h]
+        hidden = self.context_attn(expand_slot_hidden.reshape(ds * slot_dim, ts, -1),
                                    hidden, hidden, casual_mask)[0]
+        
         g = torch.sigmoid(self.gate(torch.cat([hidden_curr, hidden], dim=-1)))
         hidden = g * hidden_curr + (1 - g) * hidden
 
@@ -233,30 +240,34 @@ class BeliefTracker(nn.Module):
         # print(update)
         if update is not None:
             hidden_update = torch.tanh(self.clsf_update(self.dropout(hidden)))
-            prob_update = self.update_linear(torch.cat([hidden_update, torch.cat([torch.zeros_like(hidden_update[:, :, :1]).to(device=hidden_update.device), hidden_update[:, :, :-1]], dim=2)], dim=-1))
+            prev_hidden = torch.cat([hidden_update.new_zeros(slot_dim, ds, 1, self.bert_output_dim), hidden_update[:, :, :-1]], dim=2)
+            prob_update = self.update_linear(torch.cat([hidden_update, prev_hidden], dim=-1))
+            # prob_update = self.update_linear(torch.cat([hidden_update, 
+            #                                             torch.cat([torch.zeros_like(hidden_update[:, :, :1]).to(device=hidden_update.device), hidden_update[:, :, :-1]], dim=2)], dim=-1))
             loss_update = self.nll(prob_update.view(-1, 2), update.permute(2, 0, 1).reshape(-1))
+            true_label_num = (update > -1).to(dtype=loss_update.dtype).sum()
+            loss_update = loss_update / true_label_num
             _, update_pred = torch.max(prob_update, -1)
             num_update_label = torch.sum(update != -1).float()
             acc_update = (update_pred == update.permute(2, 0, 1)).sum().float() / num_update_label
             loss = loss_update
 
-            self.update_metric("update_loss", loss_update.detach(), num=ds)
-            self.update_metric("update_acc", acc_update, num=num_update_label)
+            self.update_metric("update_loss", loss_update.item(), num=ds)
+            self.update_metric("update_acc", acc_update.item(), num=num_update_label.item())
             # print(loss_update)
 
         # Label (slot-value) encoding
         loss_slot = [0.] * slot_dim
         # pred_slot = []
         # output = []
-        type_loss = 0.
         matching_loss = 0.
 
         hid_label = self.defined_values
         num_slot_labels = hid_label.size(1)
 
         if self.distance_metric == 'product':
-            _hid_label = hid_label.unsqueeze(1).unsqueeze(1).repeat(1, ds, ts, 1, 1).view(slot_dim * ds * ts,
-                                                                                          num_slot_labels, -1)
+            _hid_label = hid_label.unsqueeze(1).unsqueeze(1).repeat(1, ds, ts, 1, 1).view(
+                slot_dim * ds * ts, num_slot_labels, -1)
             _hidden = hidden.reshape(slot_dim * ds * ts, 1, -1)
             _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(slot_dim, ds, ts, num_slot_labels)
         else:
@@ -273,7 +284,7 @@ class BeliefTracker(nn.Module):
 
         if labels is not None:
             # No undefined value fix
-            _loss = self.nll(_dist.reshape(-1, num_slot_labels), labels.permute(2, 0, 1).reshape(-1))
+            _loss = self.nll(_dist.reshape(-1, num_slot_labels), labels.permute(2, 0, 1).reshape(-1)) / ds / ts
             matching_loss += _loss.item()
             loss += _loss
             # loss_slot = _loss.detach()
@@ -281,12 +292,13 @@ class BeliefTracker(nn.Module):
         if labels is None:
             return _dist.detach()
 
+        # print(loss.item())
         self.update_metric("matching_loss", matching_loss, num=ds)
 
         # calculate joint accuracy
         # pred_slot = torch.cat(pred_slot, 2)  # (ds, ts, slot_dim)
         pred_slot = pred_slot.permute(1, 2, 0).contiguous().detach()
-        accuracy = (pred_slot == labels).view(-1, slot_dim)
+        accuracy = (pred_slot == labels).view(-1, slot_dim).detach()
         # Slot accuracy
         slot_data_num = torch.sum(labels.view(-1, slot_dim) > -1, dim=0).float()
         acc_slot = accuracy.sum(dim=0).float() / slot_data_num
