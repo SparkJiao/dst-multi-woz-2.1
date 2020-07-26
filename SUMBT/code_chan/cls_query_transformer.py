@@ -71,8 +71,8 @@ class BeliefTracker(nn.Module):
         logger.info(f'Value vectors embedding type: {args.value_embedding_type}')
         self.value_embedding_type = args.value_embedding_type
         # self.value_lookup = nn.ModuleList([nn.Embedding(num_label, self.bert_output_dim) for num_label in num_labels])
-        self.defined_values = None
-        self.value_mask = None
+        # self.defined_values = None
+        # self.value_mask = None
 
         query_attn_config = copy.deepcopy(self.sv_encoder.config)
         query_attn_config.num_attention_heads = self.attn_head
@@ -169,10 +169,11 @@ class BeliefTracker(nn.Module):
             value_num = value.size(0)
             value_tensor[s, :value_num] = value
             value_mask[s, :value_num] = value.new_ones(value.size()[:-1], dtype=torch.long)
-        # self.register_buffer("defined_values", value_tensor)
-        # self.register_buffer("value_mask", value_mask)
-        self.defined_values = value_tensor
-        self.value_mask = value_mask
+        self.register_buffer("defined_values", value_tensor)
+        self.register_buffer("value_mask", ((1 - value_mask).to(dtype=value_tensor.dtype) * -10000.0)[:, None, None, :])
+        # self.defined_values = value_tensor
+        # self.value_mask = ((1 - value_mask).to(dtype=value_tensor.dtype) * (-10000.0))
+        # self.value_mask = self.value_mask[:, None, None, :]
 
         print("Complete initialization of slot and value lookup")
 
@@ -268,6 +269,7 @@ class BeliefTracker(nn.Module):
         matching_loss = 0.
 
         hid_label = self.defined_values
+        hid_mask = self.value_mask
         num_slot_labels = hid_label.size(1)
 
         if self.distance_metric == 'product':
@@ -282,8 +284,13 @@ class BeliefTracker(nn.Module):
                 slot_dim * ds * ts * num_slot_labels, -1)
             _dist = self.metric(_hid_label, _hidden).view(slot_dim, ds, ts, num_slot_labels)
 
+        # hid_mask = hid_mask.view(slot_dim, 1, 1, num_slot_labels).to(dtype=_hidden.dtype)
+        # hid_mask = (1 - hid_mask) * (-60000.0)
+
         if self.distance_metric == 'euclidean':
             _dist = -_dist
+
+        _dist = _dist + hid_mask
 
         _, pred_slot = torch.max(_dist, -1)
 
