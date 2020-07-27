@@ -71,10 +71,19 @@ class BeliefTracker(nn.Module):
         self.value_embedding_type = args.value_embedding_type
         self.value_lookup = nn.ModuleList([nn.Embedding(num_label, self.bert_output_dim) for num_label in num_labels])
 
+        self.add_query_attn = args.add_query_attn
+        if args.add_query_attn:
+            query_attn_config = copy.deepcopy(self.sv_encoder.config)
+            query_attn_config.num_attention_heads = self.attn_head
+            self.query_attn = layers.Attention(query_attn_config, add_output=False, use_residual=False, add_layer_norm=False)
+            self.query_output = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
+            self.queryLayerNorm = nn.LayerNorm(self.bert_output_dim, eps=query_attn_config.layer_norm_eps)            
+
         # NBT
         nbt_config = copy.deepcopy(self.sv_encoder.config)
         nbt_config.num_hidden_layers = args.num_layers
         nbt_config.intermediate_size = args.intermediate_size
+        nbt_config.num_attention_heads = self.attn_head
         self.nbt_config = nbt_config
 
         self.position_embedding = self.utterance_encoder.bert.embeddings.position_embeddings
@@ -176,7 +185,8 @@ class BeliefTracker(nn.Module):
             value_tensor[s, :value_num] = value
             value_mask[s, :value_num] = value.new_ones(value.size()[:-1], dtype=torch.long)
         self.register_buffer("defined_values", value_tensor)
-        self.register_buffer("value_mask", value_mask)
+        # self.register_buffer("value_mask", value_mask)
+        self.register_buffer("value_mask", ((1 - value_mask).to(dtype=value_tensor.dtype) * -10000.0)[:, None, None, :])
 
         print("Complete initialization of slot and value lookup")
 
@@ -204,6 +214,7 @@ class BeliefTracker(nn.Module):
         bs = ds * ts
         slot_dim = len(target_slot)
 
+        seq_attention_mask = attention_mask
         attention_mask = attention_mask.view(-1, 1, self.max_seq_length).to(dtype=torch.long)
         flat_attention_mask = attention_mask.view(-1, 1, self.max_seq_length).expand(-1, self.max_seq_length, -1)  # (bs, seq_len, seq_len)
         # (bs, seq_len, seq_len + slot_len)
@@ -221,8 +232,16 @@ class BeliefTracker(nn.Module):
         # Utterance encoding
         output = self.utterance_encoder(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, position_ids=pos_ids)
         slot_hidden = output[0][:, self.max_seq_length:]
-        slot_hidden = slot_hidden.view(bs, slot_dim, self.max_slot_length, self.bert_output_dim)
-        slot_h = slot_hidden[:, :, 0].view(ds, ts, slot_dim, -1).transpose(1, 2).reshape(ds * slot_dim, ts, -1)
+        seq_hidden = output[0][:, :self.max_seq_length]
+        slot_hidden = slot_hidden.view(bs, slot_dim, self.max_slot_length, self.bert_output_dim)[:, :, 0]
+        slot_h = slot_hidden.view(ds, ts, slot_dim, -1).transpose(1, 2).reshape(ds * slot_dim, ts, -1)
+
+        if self.add_query_attn:
+            queried_seq_h = self.query_attn(slot_hidden, seq_hidden, seq_hidden,
+                                            attention_mask=self.utterance_encoder.get_extended_attention_mask(seq_attention_mask.view(bs, -1),
+                                                                                                              (bs, slot_dim), self.device))[0]
+            queried_seq_h = queried_seq_h.view(ds, ts, slot_dim, -1).transpose(1, 2).reshape(ds * slot_dim, ts, -1)
+            slot_h = self.queryLayerNorm(self.dropout(self.query_output(torch.cat([slot_h, queried_seq_h], dim=-1))))
 
         turn_ids = torch.arange(ts, dtype=torch.long, device=self.device)
         casual_mask = turn_ids[None, :].repeat(ts, 1) <= turn_ids[:, None]
@@ -252,6 +271,7 @@ class BeliefTracker(nn.Module):
         matching_loss = 0.
 
         hid_label = self.defined_values
+        hid_mask = self.value_mask
         num_slot_labels = hid_label.size(1)
 
         if self.distance_metric == 'product':
@@ -265,6 +285,8 @@ class BeliefTracker(nn.Module):
 
         if self.distance_metric == 'euclidean':
             _dist = -_dist
+
+        _dist = _dist + hid_mask
 
         _, pred_slot = torch.max(_dist, -1)
 
