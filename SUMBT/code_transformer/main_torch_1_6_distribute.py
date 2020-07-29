@@ -1048,6 +1048,8 @@ def main():
     ###############################################################################
     # Load a trained model that you have fine-tuned
     predict_dir = args.predict_dir if args.predict_dir is not None else args.output_dir
+    best_checkpoint = None
+    best_dev_acc = 0.0
     if not os.path.exists(predict_dir):
         os.makedirs(predict_dir, exist_ok=True)
     # for state_name in ['pytorch_model.bin', 'pytorch_model_loss.bin']:
@@ -1090,11 +1092,12 @@ def main():
         #         raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         #     model = amp.initialize(model, opt_level=args.fp16_opt_level)
 
-        # Evaluation
+        # Evaluation on dev set
         if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 
-            eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation,
-                                                        test_file=args.test_file)
+            # eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation,
+            #                                             test_file=args.eval_file)
+            eval_examples = processor.get_dev_examples(args.data_dir, accumulation=False, dev_file=args.dev_file)
             all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
             all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
@@ -1268,6 +1271,218 @@ def main():
                         (accuracies['joint_type_train'] / accuracies['num_turn']).item(),
                         (accuracies['slot_type_train'] / accuracies['num_slot_train']).item()
                     ))
+
+            if result['eval_accuracy'] > best_dev_acc:
+                best_dev_acc = result['eval_accuracy']
+                best_checkpoint = checkpoint
+
+    args.output_dir = os.path.join(args.output_dir, best_checkpoint)
+    args.predict_dir = args.output_dir
+    state_name = "pytorch_model.bin"
+
+    model = BeliefTracker(args, num_labels, device)
+    logger.info(f'Loading saved model from {os.path.join(args.output_dir, state_name)}')
+    output_model_file = os.path.join(args.output_dir, state_name)
+
+    # in the case that slot and values are different between the training and evaluation
+    ptr_model = torch.load(output_model_file)
+    # Initialize slot value look up to avoid mismatch
+    for k in list(ptr_model.keys()):
+        if 'slot_lookup' in k or 'value_lookup' in k:
+            ptr_model.pop(k)
+
+    if n_gpu == 1:
+        state = model.state_dict()
+        state.update(ptr_model)
+        state = get_pretrain(model, state)
+        model.load_state_dict(state)
+    else:
+        print("Evaluate using only one device!")
+        model.module.load_state_dict(ptr_model)
+
+    model.to(device)
+    model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
+
+    # Evaluation on dev set
+    if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
+
+        eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation,
+                                                    test_file=args.eval_file)
+        all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
+            eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
+        all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
+        # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device),
+        # all_label_ids.to(device)
+        logger.info("***** Running evaluation *****")
+        logger.info("  Num examples = %d", len(eval_examples))
+        logger.info("  Batch size = %d", args.eval_batch_size)
+
+        eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
+                                  all_label_ids)
+
+        # Run prediction for full data
+        eval_sampler = SequentialSampler(eval_data)
+        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
+        model.eval()
+        eval_loss, eval_accuracy = 0, 0
+        eval_loss_slot, eval_acc_slot = None, None
+        nb_eval_steps, nb_eval_examples = 0, 0
+
+        accuracies = {'joint5': 0, 'joint_type5': 0, 'slot5': 0, 'slot_type5': 0, 'num_slot5': 0, 'num_turn': 0,
+                      'joint_rest': 0, 'joint_type_rest': 0, 'slot_rest': 0, 'slot_type_rest': 0,
+                      'num_slot_rest': 0,
+                      'joint_taxi': 0, 'joint_type_taxi': 0, 'slot_taxi': 0, 'slot_type_taxi': 0,
+                      'num_slot_taxi': 0,
+                      'joint_hotel': 0, 'joint_type_hotel': 0, 'slot_hotel': 0, 'slot_type_hotel': 0,
+                      'num_slot_hotel': 0,
+                      'joint_attraction': 0, 'joint_type_attraction': 0, 'slot_attraction': 0,
+                      'slot_type_attraction': 0,
+                      'num_slot_attraction': 0,
+                      'joint_train': 0, 'joint_type_train': 0, 'slot_train': 0, 'slot_type_train': 0,
+                      'num_slot_train': 0}
+        predictions = []
+
+        for input_ids, token_type_ids, input_mask, answer_type_ids, label_ids in tqdm(eval_dataloader,
+                                                                                      desc="Evaluating"):
+            input_ids = input_ids.to(device)
+            token_type_ids = token_type_ids.to(device)
+            input_mask = input_mask.to(device)
+            answer_type_ids = answer_type_ids.to(device)
+            label_ids = label_ids.to(device)
+            if input_ids.dim() == 2:
+                input_ids = input_ids.unsqueeze(0)
+                token_type_ids = token_type_ids.unsqueeze(0)
+                input_mask = input_mask.unsqueeze(0)
+                answer_type_ids = answer_type_ids.unsqueeze(0)
+                label_ids = label_ids.unsuqeeze(0)
+
+            with torch.no_grad():
+                with torch.cuda.amp.autocast():
+                    if n_gpu == 1:
+                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
+                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                    else:
+                        loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
+                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        nbatch = label_ids.size(0)
+                        nslot = pred_slot.size(3)
+                        pred_slot = pred_slot.view(nbatch, -1, nslot)
+
+            accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
+            predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor,
+                                               gate=model.get_gate_metric(reset=True) if args.save_gate else None,
+                                               value_scores=model.get_value_scores(
+                                                   reset=True) if args.save_gate else None,
+                                               graph_scores=model.get_graph_scores(
+                                                   reset=True) if args.save_gate else None))
+
+            nb_eval_ex = (answer_type_ids[:, :, 0].view(-1) != -1).sum().item()
+            nb_eval_examples += nb_eval_ex
+            nb_eval_steps += 1
+
+            if n_gpu == 1:
+                eval_loss += loss.item() * nb_eval_ex
+                eval_accuracy += acc.item() * nb_eval_ex
+                if eval_loss_slot is None:
+                    eval_loss_slot = [l * nb_eval_ex for l in loss_slot]
+                    eval_acc_slot = acc_slot * nb_eval_ex
+                else:
+                    for i, l in enumerate(loss_slot):
+                        eval_loss_slot[i] = eval_loss_slot[i] + l * nb_eval_ex
+                    eval_acc_slot += acc_slot * nb_eval_ex
+            else:
+                eval_loss += sum(loss) * nb_eval_ex
+                eval_accuracy += sum(acc) * nb_eval_ex
+
+        eval_loss = eval_loss / nb_eval_examples
+        eval_accuracy = eval_accuracy / nb_eval_examples
+        if n_gpu == 1:
+            eval_acc_slot = eval_acc_slot / nb_eval_examples
+
+        loss = tr_loss / nb_tr_steps if args.do_train else None
+
+        if n_gpu == 1:
+            result = {'eval_loss': eval_loss,
+                      'eval_accuracy': eval_accuracy,
+                      'loss': loss,
+                      'eval_loss_slot': '\t'.join([str(val / nb_eval_examples) for val in eval_loss_slot]),
+                      'eval_acc_slot': '\t'.join([str((val).item()) for val in eval_acc_slot])
+                      }
+        else:
+            result = {'eval_loss': eval_loss,
+                      'eval_accuracy': eval_accuracy,
+                      'loss': loss
+                      }
+
+        out_file_name = f'eval_results_{state_name}'
+        if args.target_slot == 'all':
+            out_file_name += '_all'
+        output_eval_file = os.path.join(predict_dir, "%s.txt" % out_file_name)
+
+        with open(output_eval_file, "w") as writer:
+            logger.info("***** Eval results *****")
+            for key in sorted(result.keys()):
+                logger.info("  %s = %s", key, str(result[key]))
+                writer.write("%s = %s\n" % (key, str(result[key])))
+
+        with open(os.path.join(predict_dir, f"predictions_{state_name}.json"), 'w') as f:
+            json.dump(predictions, f, indent=2)
+
+        if hasattr(model, "get_metric"):
+            with open(os.path.join(predict_dir, f"eval_metric_{state_name}.json"), 'w') as f:
+                json.dump(model.get_metric(reset=False), f, indent=2)
+
+        out_file_name = f'eval_all_accuracies_{state_name}'
+        with open(os.path.join(predict_dir, "%s.txt" % out_file_name), 'w') as f:
+            f.write(
+                'joint acc (5 domain) : %.5f \t slot acc (5 domain) : %.5f \n'
+                'joint acc type (5 domain) : %.5f \t slot acc type (5 domain) : %.5f \n'
+
+                'joint restaurant : %.5f \t slot acc restaurant : %.5f \n'
+                'joint restaurant type : %.5f \t slot acc restaurant type : %.5f \n'
+
+                'joint taxi : %.5f \t slot acc taxi : %.5f \n'
+                'joint taxi type : %.5f \t slot acc taxi type : %.5f \n'
+
+                'joint hotel : %.5f \t slot acc hotel : %.5f \n'
+                'joint hotel type : %.5f \t slot acc hotel type : %.5f \n'
+
+                'joint attraction : %.5f \t slot acc attraction : %.5f \n'
+                'joint attraction type : %.5f \t slot acc attraction type : %.5f \n'
+
+                'joint train : %.5f \t slot acc train %.5f \n'
+                'joint train type : %.5f \t slot acc train type %.5f \n' % (
+                    (accuracies['joint5'] / accuracies['num_turn']).item(),
+                    (accuracies['slot5'] / accuracies['num_slot5']).item(),
+                    (accuracies['joint_type5'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_type5'] / accuracies['num_slot5']).item(),
+
+                    (accuracies['joint_rest'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_rest'] / accuracies['num_slot_rest']).item(),
+                    (accuracies['joint_type_rest'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_type_rest'] / accuracies['num_slot_rest']).item(),
+
+                    (accuracies['joint_taxi'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_taxi'] / accuracies['num_slot_taxi']).item(),
+                    (accuracies['joint_type_taxi'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_type_taxi'] / accuracies['num_slot_taxi']).item(),
+
+                    (accuracies['joint_hotel'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_hotel'] / accuracies['num_slot_hotel']).item(),
+                    (accuracies['joint_type_hotel'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_type_hotel'] / accuracies['num_slot_hotel']).item(),
+
+                    (accuracies['joint_attraction'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_attraction'] / accuracies['num_slot_attraction']).item(),
+                    (accuracies['joint_type_attraction'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_type_attraction'] / accuracies['num_slot_attraction']).item(),
+
+                    (accuracies['joint_train'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_train'] / accuracies['num_slot_train']).item(),
+                    (accuracies['joint_type_train'] / accuracies['num_turn']).item(),
+                    (accuracies['slot_type_train'] / accuracies['num_slot_train']).item()
+                ))
 
 
 def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
