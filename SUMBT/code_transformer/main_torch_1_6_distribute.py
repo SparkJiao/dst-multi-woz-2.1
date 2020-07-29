@@ -723,8 +723,8 @@ def main():
         if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train:
             raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
         os.makedirs(args.output_dir, exist_ok=True)
-
-        torch.distributed.barrier()
+        if args.local_rank == 0:
+            torch.distributed.barrier()
 
     if not args.do_train and not args.do_eval and not args.do_analyze:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
@@ -1053,15 +1053,16 @@ def main():
     # for state_name in ['pytorch_model.bin', 'pytorch_model_loss.bin']:
     # for state_name in ['pytorch_model.bin']:
     for checkpoint in os.listdir(args.output_dir):
-        if not os.path.isdir(checkpoint):
+        if not os.path.isdir(os.path.join(args.output_dir, checkpoint)):
             continue
-        state_name = os.path.join(checkpoint, "pytorch_model.bin")
+        state_name = checkpoint
+        checkpoint = os.path.join(checkpoint, "pytorch_model.bin")
 
-        if not os.path.exists(os.path.join(args.output_dir, state_name)):
+        if not os.path.exists(os.path.join(args.output_dir, checkpoint)):
             continue
         model = BeliefTracker(args, num_labels, device)
-        logger.info(f'Loading saved model from {os.path.join(args.output_dir, state_name)}')
-        output_model_file = os.path.join(args.output_dir, state_name)
+        logger.info(f'Loading saved model from {os.path.join(args.output_dir, checkpoint)}')
+        output_model_file = os.path.join(args.output_dir, checkpoint)
 
         # in the case that slot and values are different between the training and evaluation
         ptr_model = torch.load(output_model_file)
