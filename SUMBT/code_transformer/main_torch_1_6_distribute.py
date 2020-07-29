@@ -1283,7 +1283,7 @@ def eval_all_accs(pred_slot, answer_type_ids, labels, accuracies):
         num_turn = torch.sum(_answer_type_ids[:, :, 0].view(-1) > -1, 0).float()
         num_data = torch.sum(_answer_type_ids > -1).float()
         # joint accuracy
-        joint_acc = sum(torch.sum(accuracy, 1) / slot_dim).float()
+        joint_acc = sum(torch.sum(accuracy, 1) // slot_dim).float()
         joint_acc_type = sum(torch.sum(answer_type_accuracy, dim=1) // slot_dim).float()
         # slot accuracy
         slot_acc = torch.sum(accuracy).float()

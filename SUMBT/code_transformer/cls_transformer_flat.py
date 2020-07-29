@@ -117,6 +117,7 @@ class BeliefTracker(nn.Module):
 
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
+        self.efficient = args.efficient
 
         # Metric
         self.metrics = {
@@ -184,6 +185,7 @@ class BeliefTracker(nn.Module):
             value_num = value.size(0)
             value_tensor[s, :value_num] = value
             value_mask[s, :value_num] = value.new_ones(value.size()[:-1], dtype=torch.long)
+        value_tensor = value_tensor.half()
         self.register_buffer("defined_values", value_tensor)
         # self.register_buffer("value_mask", value_mask)
         self.register_buffer("value_mask", ((1 - value_mask).to(dtype=value_tensor.dtype) * -10000.0)[:, None, None, :])
@@ -277,11 +279,17 @@ class BeliefTracker(nn.Module):
         if self.distance_metric == 'product':
             _hid_label = hid_label.unsqueeze(1).unsqueeze(1).repeat(1, ds, ts, 1, 1).view(slot_dim * ds * ts, num_slot_labels, -1)
             _hidden = hidden.reshape(slot_dim * ds * ts, 1, -1)
-            _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(slot_dim, ds, ts, num_slot_labels)
+            if self.efficient and _hidden.requires_grad:
+                _dist = torch.utils.checkpoint.checkpoint(self.metric, _hidden, _hid_label).squeeze(1).reshape(slot_dim, ds, ts, num_slot_labels)
+            else:
+                _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(slot_dim, ds, ts, num_slot_labels)
         else:
             _hid_label = hid_label.unsqueeze(1).unsqueeze(1).repeat(1, ds, ts, 1, 1).view(slot_dim * ds * ts * num_slot_labels, -1)
             _hidden = hidden.unsqueeze(3).repeat(1, 1, 1, num_slot_labels, 1).reshape(slot_dim * ds * ts * num_slot_labels, -1)
-            _dist = self.metric(_hid_label, _hidden).view(slot_dim, ds, ts, num_slot_labels)
+            if self.efficient and _hidden.requires_grad:
+                _dist = torch.utils.checkpoint.checkpoint(self.metric, _hid_label, _hidden).view(slot_dim, ds, ts, num_slot_labels)
+            else:
+                _dist = self.metric(_hid_label, _hidden).view(slot_dim, ds, ts, num_slot_labels)
 
         if self.distance_metric == 'euclidean':
             _dist = -_dist
