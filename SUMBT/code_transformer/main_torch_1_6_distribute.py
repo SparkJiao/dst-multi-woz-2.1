@@ -669,9 +669,6 @@ def main():
     parser.add_argument('--use_mt', default=False, action='store_true')
     parser.add_argument('--inter_domain', default=False, action='store_true')
 
-    parser.add_argument('--extra_nbt', default=False, action='store_true')
-    parser.add_argument('--extra_nbt_attn_head', default=6, type=int)
-
     parser.add_argument('--ff_hidden_size', type=int, default=1536)
     parser.add_argument('--ff_add_layer_norm', default=False, action='store_true')
     parser.add_argument('--ff_add_residual', default=False, action='store_true')
@@ -699,6 +696,11 @@ def main():
     parser.add_argument('--test_mode', default=-1, type=int)
 
     parser.add_argument('--remove_unrelated', default=False, action='store_true')
+
+    parser.add_argument('--efficient', default=False, action='store_true')
+    parser.add_argument('--use_copy', default=False, action='store_true')
+    parser.add_argument('--hard_copy', default=False, action='store_true')
+    parser.add_argument('--add_interaction', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -852,6 +854,8 @@ def main():
         from cls_transformer_flat import BeliefTracker
     elif args.nbt == 'query':
         from cls_query_transformer import BeliefTracker
+    elif args.nbt == 'copy':
+        from cls_transformer_flat_copy import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -907,19 +911,6 @@ def main():
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(t_total * args.warmup_proportion),
                                                     num_training_steps=t_total)
 
-        # if args.fp16:
-        #     # try:
-        #     #     from apex import amp
-        #     # except ImportError:
-        #     #     raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-
-        #     # if args.max_loss_scale is not None:
-        #     #     model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level, max_loss_scale=args.max_loss_scale)
-        #     # else:
-        #     #     model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
-        #     scaler = torch.cuda.amp.GradScaler()
-        # else:
-        #     scaler = None
         scaler = torch.cuda.amp.GradScaler()
 
         logger.info(optimizer)
@@ -978,27 +969,12 @@ def main():
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
 
-                # Backward
-                # if args.fp16:
-                #     scaler.scale(loss).backward()
-                #     # with amp.scale_loss(loss, optimizer) as scaled_loss:
-                #         # scaled_loss.backward()
-                # else:
-                #     loss.backward()
                 scaler.scale(loss).backward()
 
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    # modify lealrning rate with special warm up BERT uses
-                    # if args.fp16:
-                    #     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-                    #     scaler.step(optimizer)
-                    #     scaler.update()
-                    # else:
-                    #     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                    #     optimizer.step()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                     scaler.step(optimizer)
@@ -1046,12 +1022,32 @@ def main():
     ###############################################################################
     # Evaluation
     ###############################################################################
+
+    if args.local_rank not in [-1, 0]:
+        return
     # Load a trained model that you have fine-tuned
     predict_dir = args.predict_dir if args.predict_dir is not None else args.output_dir
     best_checkpoint = None
     best_dev_acc = 0.0
     if not os.path.exists(predict_dir):
         os.makedirs(predict_dir, exist_ok=True)
+
+    eval_examples = processor.get_dev_examples(args.data_dir, accumulation=False, dev_file=args.dev_file)
+    all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
+        eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
+    all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
+
+    logger.info("***** Running evaluation *****")
+    logger.info("  Num examples = %d", len(eval_examples))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+
+    eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
+                              all_label_ids)
+
+    # Run prediction for full data
+    eval_sampler = SequentialSampler(eval_data)
+    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
     # for state_name in ['pytorch_model.bin', 'pytorch_model_loss.bin']:
     # for state_name in ['pytorch_model.bin']:
     for checkpoint in os.listdir(args.output_dir):
@@ -1085,34 +1081,8 @@ def main():
         model.to(device)
         model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
 
-        # if args.fp16:
-        #     try:
-        #         from apex import amp
-        #     except ImportError:
-        #         raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-        #     model = amp.initialize(model, opt_level=args.fp16_opt_level)
-
         # Evaluation on dev set
         if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-
-            # eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation,
-            #                                             test_file=args.eval_file)
-            eval_examples = processor.get_dev_examples(args.data_dir, accumulation=False, dev_file=args.dev_file)
-            all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
-                eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-            all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
-            # all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device),
-            # all_label_ids.to(device)
-            logger.info("***** Running evaluation *****")
-            logger.info("  Num examples = %d", len(eval_examples))
-            logger.info("  Batch size = %d", args.eval_batch_size)
-
-            eval_data = TensorDataset(all_input_ids, all_token_type_ids, all_input_mask, all_answer_type_ids,
-                                      all_label_ids)
-
-            # Run prediction for full data
-            eval_sampler = SequentialSampler(eval_data)
-            eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
             model.eval()
             eval_loss, eval_accuracy = 0, 0
@@ -1274,7 +1244,7 @@ def main():
 
             if result['eval_accuracy'] > best_dev_acc:
                 best_dev_acc = result['eval_accuracy']
-                best_checkpoint = checkpoint
+                best_checkpoint = state_name
 
     args.output_dir = os.path.join(args.output_dir, best_checkpoint)
     args.predict_dir = args.output_dir
