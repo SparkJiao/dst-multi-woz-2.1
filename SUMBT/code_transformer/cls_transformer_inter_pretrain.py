@@ -80,8 +80,8 @@ class BeliefTracker(nn.Module):
 
         self.position_embedding = self.utterance_encoder.bert.embeddings.position_embeddings
         if args.sinusoidal_embeddings:
-            self.position_embedding = nn.Embedding(args.max_turn + 8, self.bert_output_dim)
-            create_sinusoidal_embeddings(args.max_turn + 8, self.bert_output_dim, self.position_embedding.weight)
+            self.position_embedding = nn.Embedding(args.max_turn_length + 8, self.bert_output_dim)
+            create_sinusoidal_embeddings(args.max_turn_length + 8, self.bert_output_dim, self.position_embedding.weight)
             assert not self.position_embedding.weight.requires_grad
         self.positionLayerNorm = nn.LayerNorm(self.bert_output_dim, eps=nbt_config.layer_norm_eps)
 
@@ -213,19 +213,19 @@ class BeliefTracker(nn.Module):
         slot_type_ids = torch.cat([q_slot_type_ids, k_slot_type_ids], dim=0)
         q_slot_mask = self.slot_mask.index_select(index=q_slot_idx, dim=0).reshape(i_ds, slot_dim, self.max_slot_length)
         k_slot_mask = self.slot_mask.index_select(index=key_slot_idx, dim=0).reshape(i_ds * sample_num, slot_dim, -1)
-        slot_mask = torch.cat([q_slot_mask, k_slot_mask], dim=0).reshape(i_ds * sample_num, slot_dim, -1)
+        slot_mask = torch.cat([q_slot_mask, k_slot_mask], dim=0)
         slot_to_slot_mask = slot_mask.new_zeros(i_ds * (sample_num + 1), slot_dim, slot_dim, self.max_slot_length)
         for i in range(slot_dim):
-            slot_to_slot_mask[:, i, i] = slot_mask
+            slot_to_slot_mask[:, i, i] = slot_mask[:, i]
         slot_to_slot_mask = slot_to_slot_mask.unsqueeze(2).expand(-1, -1, self.max_slot_length, -1, -1
                                                                   ).reshape(-1, total_slot_len, total_slot_len)
         ds = i_ds * (sample_num + 1)
         bs = ds * ts
 
         # Combine input
-        input_ids = torch.cat([q_input_ids, k_input_ids.view(ds * sample_num, ts, -1)], dim=0)
-        token_type_ids = torch.cat([q_token_type_ids, k_token_type_ids.view(ds * sample_num, ts, -1)], dim=0)
-        attention_mask = torch.cat([q_attention_mask, k_attention_mask.view(ds * sample_num, ts, -1)], dim=0)
+        input_ids = torch.cat([q_input_ids, k_input_ids.view(i_ds * sample_num, ts, -1)], dim=0)
+        token_type_ids = torch.cat([q_token_type_ids, k_token_type_ids.view(i_ds * sample_num, ts, -1)], dim=0)
+        attention_mask = torch.cat([q_attention_mask, k_attention_mask.view(i_ds * sample_num, ts, -1)], dim=0)
 
         # Utterance encoding
         input_ids = input_ids.view(-1, self.max_seq_length)
@@ -265,9 +265,9 @@ class BeliefTracker(nn.Module):
             if self.add_query_attn:
                 queried_seq_h = self.query_attn(slot_hidden, seq_hidden, seq_hidden,
                                                 attention_mask=extended_mask)[0]
-                hidden = self.transformer(slot_h, casual_mask, full_mask, slot_dim, queried_seq_h)[0]
+                hidden = self.transformer(slot_h, casual_mask, full_mask, queried_seq_h, slot_dim=slot_dim)[0]
             else:
-                hidden = self.transformer(slot_h, casual_mask, full_mask, slot_dim)[0]
+                hidden = self.transformer(slot_h, casual_mask, full_mask, slot_dim=slot_dim)[0]
         else:
             # (ds * slot_dim, ts, h)
             hidden = self.transformer(
@@ -280,13 +280,15 @@ class BeliefTracker(nn.Module):
         q_hidden = q_hidden.gather(dim=1, index=q_valid_turn.view(i_ds, 1, 1).expand(-1, -1, self.bert_output_dim))
         k_hidden = k_hidden.gather(
             index=key_valid_turn.view(i_ds, sample_num, 1, 1).expand(-1, -1, -1, self.bert_output_dim),
-            dim=2).squeeze()
+            dim=2).squeeze(2)
 
         query = self.project1(q_hidden)
         key = self.project2(k_hidden)
-        logits = query.bmm(key.transpose(1, 2))
+        logits = query.bmm(key.transpose(1, 2)).squeeze(1)
 
-        loss = self.nll(logits, label)
+        # print(logits.size(), label.size())
+
+        loss = self.nll(logits, label.view(-1))
         _, pred = logits.max(dim=-1)
         acc = torch.sum(pred == label).float() / i_ds
 

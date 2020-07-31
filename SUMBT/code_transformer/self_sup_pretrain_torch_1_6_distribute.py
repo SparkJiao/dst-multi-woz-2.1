@@ -483,7 +483,7 @@ class ContrastiveDataset(Dataset):
         q_features = tuple([feature[index] for feature in self.features])
 
         # positive sample
-        pos_valid_turn = self.valid_turn[index]
+        pos_valid_turn = self.valid_turn[index].item()
         pos_slot_idx = torch.LongTensor(random.sample(self.slot_ids, self.sample_slot_num))
         pos_features = [feature[index] for feature in self.features]
 
@@ -495,16 +495,16 @@ class ContrastiveDataset(Dataset):
         neg_slot_idx = []
         neg_features = [[] for _ in range(len(self.features))]
         for neg_idx in negative_sample_index:
-            neg_valid_turn.append(self.valid_turn[neg_idx])
+            neg_valid_turn.append(self.valid_turn[neg_idx].item())
             neg_slot_idx.append(torch.LongTensor(random.sample(self.slot_ids, self.sample_slot_num)).unsqueeze(0))
             for f_id, feature in enumerate(self.features):
                 neg_features[f_id].append(feature[neg_idx].unsqueeze(0))
-        neg_valid_turn = torch.cat(neg_valid_turn, dim=0)  # (sample_key_num)
+        # neg_valid_turn = torch.cat(neg_valid_turn, dim=0)  # (sample_key_num)
         neg_slot_idx = torch.cat(neg_slot_idx, dim=0)  # (sample_key_num, sample_slot_num)
         neg_features = [torch.cat(f_list, dim=0) for f_list in neg_features]  # each feature: (sample_key_num, *size)
 
         label = torch.LongTensor([0])
-        key_valid_turn = torch.cat([pos_valid_turn, neg_valid_turn], dim=0)
+        key_valid_turn = torch.LongTensor([pos_valid_turn] + neg_valid_turn)
         key_slot_idx = torch.cat([pos_slot_idx.unsqueeze(0), neg_slot_idx], dim=0)
         key_features = [torch.cat([pos_feature.unsqueeze(0), neg_feature], dim=0)
                         for pos_feature, neg_feature in zip(pos_features, neg_features)]
@@ -691,6 +691,7 @@ def main():
     parser.add_argument('--num_layers', default=0, type=int)
     parser.add_argument('--intermediate_size', default=3072, type=int)
     parser.add_argument('--add_query_attn', default=False, action='store_true')
+    parser.add_argument('--cls_type', default=0, type=int)
 
     parser.add_argument('--efficient', default=False, action='store_true')
     parser.add_argument('--use_copy', default=False, action='store_true')

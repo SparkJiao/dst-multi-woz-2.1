@@ -153,9 +153,9 @@ class InteractionLayer(nn.Module):
             hidden_states,
             attention_mask=None,
             interaction_mask=None,
-            slot_dim=None,
             # head_mask=None,
             encoder_hidden_states=None,
+            slot_dim=None,
             # encoder_attention_mask=None,
             # output_attentions=False,
     ):
@@ -186,9 +186,9 @@ class InteractionEncoder(nn.Module):
             hidden_states,
             attention_mask=None,
             interaction_mask=None,
-            slot_dim=None,
             # head_mask=None,
             encoder_hidden_states=None,
+            slot_dim=None,
             # encoder_attention_mask=None,
             # output_attentions=False,
             # output_hidden_states=False,
@@ -203,7 +203,7 @@ class InteractionEncoder(nn.Module):
 
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
-                        return module(*inputs)
+                        return module(*inputs, slot_dim)
 
                     return custom_forward
 
@@ -212,9 +212,8 @@ class InteractionEncoder(nn.Module):
                     hidden_states,
                     attention_mask,
                     interaction_mask,
-                    slot_dim,
-                    # head_mask[i],
                     encoder_hidden_states,
+                    # head_mask[i],
                     # encoder_attention_mask,
                 )
             else:
@@ -222,9 +221,9 @@ class InteractionEncoder(nn.Module):
                     hidden_states,
                     attention_mask,
                     interaction_mask,
+                    encoder_hidden_states,
                     slot_dim,
                     # head_mask[i],
-                    encoder_hidden_states,
                     # encoder_attention_mask,
                     # output_attentions,
                 )
