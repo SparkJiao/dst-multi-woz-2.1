@@ -75,6 +75,7 @@ class BeliefTracker(nn.Module):
         nbt_config.num_hidden_layers = args.num_layers
         nbt_config.intermediate_size = args.intermediate_size
         nbt_config.num_attention_heads = self.attn_head
+        nbt_config.gradient_checkpointing = True
         self.nbt_config = nbt_config
 
         self.position_embedding = self.utterance_encoder.bert.embeddings.position_embeddings
@@ -93,43 +94,12 @@ class BeliefTracker(nn.Module):
                 query_attn_config.num_attention_heads = self.attn_head
                 self.query_attn = layers.Attention(query_attn_config, add_output=False, use_residual=False,
                                                    add_layer_norm=True)
-                # self.query_output = nn.Linear(self.bert_output_dim * 2, self.bert_output_dim)
-                # self.queryLayerNorm = nn.LayerNorm(self.bert_output_dim, eps=query_attn_config.layer_norm_eps)
-
             self.transformer = InteractionEncoder(nbt_config)
         else:
             self.transformer = BertEncoder(nbt_config)
 
-        # Copy mechanism
-        self.use_copy = args.use_copy
-        if self.use_copy:
-            self.hard_copy = args.hard_copy
-            copy_config = copy.deepcopy(self.sv_encoder.config)
-            copy_config.num_attention_heads = self.attn_head
-            self.copy_attention = layers.Attention(copy_config, add_output=False, use_residual=False,
-                                                   add_layer_norm=False)
-            self.copy_gate = nn.Linear(self.bert_output_dim * 2, 1)
-            self.copyLayerNorm = nn.LayerNorm(self.bert_output_dim, eps=copy_config.layer_norm_eps)
-
-        if args.cls_type == 0:
-            self.classifier = nn.Linear(self.bert_output_dim, 3)
-        elif args.cls_type == 1:
-            self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
-                                            nn.Tanh(),
-                                            nn.Linear(self.bert_output_dim, 3))
-        if args.distance_metric == 'product':
-            self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim, bias=False)
-        else:
-            self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim)
-
-        # Measure
-        self.distance_metric = args.distance_metric
-        if self.distance_metric == "cosine":
-            self.metric = torch.nn.CosineSimilarity(dim=-1, eps=1e-08)
-        elif self.distance_metric == "euclidean":
-            self.metric = torch.nn.PairwiseDistance(p=2.0, eps=1e-06, keepdim=False)
-        elif self.distance_metric == 'product':
-            self.metric = layers.ProductSimilarity(self.bert_output_dim)
+        self.project1 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
+        self.project2 = nn.Linear(self.bert_output_dim, self.bert_output_dim)
 
         # Classifier
         self.nll = CrossEntropyLoss(ignore_index=-1, reduction='sum')
@@ -139,18 +109,6 @@ class BeliefTracker(nn.Module):
         # Etc.
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
         self.efficient = args.efficient
-
-        # Metric
-        self.metrics = {
-            "cls_loss": {
-                "train": Average(),
-                "eval": Average(),
-            },
-            "matching_loss": {
-                "train": Average(),
-                "eval": Average(),
-            }
-        }
 
     def initialize_slot_value_lookup(self, label_ids, slot_ids, slot_token_type_ids=None):
 
@@ -176,11 +134,11 @@ class BeliefTracker(nn.Module):
         if slot_token_type_ids is None:
             slot_token_type_ids = slot_ids.new_zeros(slot_ids.size())
         self.register_buffer("slot_token_type_ids", slot_token_type_ids)
-        # self.register_buffer("slot_mask", slot_mask.to(dtype=torch.long))
-        self.register_buffer("slot_to_slot_mask", slot_to_slot_mask.to(dtype=torch.long, device=self.device))
+        self.register_buffer("slot_mask", slot_mask.to(dtype=torch.long))
+        # self.register_buffer("slot_to_slot_mask", slot_to_slot_mask.to(dtype=torch.long, device=self.device))
         # self.register_buffer("seq_to_slot_mask", seq_to_slot_mask)
         # self.register_buffer("pos_ids", pos_ids)
-        self.register_buffer("slot_pos_ids", slot_pos_ids)
+        # self.register_buffer("slot_pos_ids", slot_pos_ids)
 
         diagonal_mask = torch.diag(torch.ones(slot_dim, device=self.device))[None, None, :, :] * -10000.0
         self.register_buffer("diagonal_mask", diagonal_mask)
@@ -232,17 +190,42 @@ class BeliefTracker(nn.Module):
         attention_mask = ids > 0
         return token_type_ids, attention_mask
 
-    def forward(self, input_ids, token_type_ids, attention_mask, answer_type_ids, labels, n_gpu=1, target_slot=None):
-
-        # if target_slot is not specified, output values corresponding all slot-types
-        if target_slot is None:
-            target_slot = list(range(0, self.num_slots))
-
-        ds = input_ids.size(0)  # dialog size
-        ts = input_ids.size(1)  # turn size
-        bs = ds * ts
-        slot_dim = len(target_slot)
+    def forward(self, q_valid_turn, q_slot_idx, q_input_ids, q_token_type_ids, q_attention_mask,
+                key_valid_turn, key_slot_idx, k_input_ids, k_token_type_ids, k_attention_mask,
+                label, n_gpu=1):
+        i_ds = q_valid_turn.size(0)
+        slot_dim = q_slot_idx.size(1)
+        sample_num = key_valid_turn.size(1)
+        ts = q_input_ids.size(1)
         total_slot_len = slot_dim * self.max_slot_length
+
+        q_slot_idx = q_slot_idx.view(-1)
+        key_slot_idx = key_slot_idx.view(-1)
+        q_slot_ids = self.slot_ids.index_select(index=q_slot_idx, dim=0).reshape(i_ds, slot_dim, -1)
+        k_slot_ids = self.slot_ids.index_select(index=key_slot_idx,
+                                                dim=0).reshape(i_ds * sample_num, slot_dim, -1)
+        slot_ids = torch.cat([q_slot_ids, k_slot_ids], dim=0)
+
+        q_slot_type_ids = self.slot_token_type_ids.index_select(index=q_slot_idx,
+                                                                dim=0).reshape(i_ds, slot_dim, self.max_slot_length)
+        k_slot_type_ids = self.slot_token_type_ids.index_select(index=key_slot_idx,
+                                                                dim=0).reshape(i_ds * sample_num, slot_dim, -1)
+        slot_type_ids = torch.cat([q_slot_type_ids, k_slot_type_ids], dim=0)
+        q_slot_mask = self.slot_mask.index_select(index=q_slot_idx, dim=0).reshape(i_ds, slot_dim, self.max_slot_length)
+        k_slot_mask = self.slot_mask.index_select(index=key_slot_idx, dim=0).reshape(i_ds * sample_num, slot_dim, -1)
+        slot_mask = torch.cat([q_slot_mask, k_slot_mask], dim=0).reshape(i_ds * sample_num, slot_dim, -1)
+        slot_to_slot_mask = slot_mask.new_zeros(i_ds * (sample_num + 1), slot_dim, slot_dim, self.max_slot_length)
+        for i in range(slot_dim):
+            slot_to_slot_mask[:, i, i] = slot_mask
+        slot_to_slot_mask = slot_to_slot_mask.unsqueeze(2).expand(-1, -1, self.max_slot_length, -1, -1
+                                                                  ).reshape(-1, total_slot_len, total_slot_len)
+        ds = i_ds * (sample_num + 1)
+        bs = ds * ts
+
+        # Combine input
+        input_ids = torch.cat([q_input_ids, k_input_ids.view(ds * sample_num, ts, -1)], dim=0)
+        token_type_ids = torch.cat([q_token_type_ids, k_token_type_ids.view(ds * sample_num, ts, -1)], dim=0)
+        attention_mask = torch.cat([q_attention_mask, k_attention_mask.view(ds * sample_num, ts, -1)], dim=0)
 
         # Utterance encoding
         input_ids = input_ids.view(-1, self.max_seq_length)
@@ -252,13 +235,13 @@ class BeliefTracker(nn.Module):
                                         attention_mask=attention_mask)
         seq_hidden = output[0]
         seq_kv = output[-1]
-        assert len(seq_kv) == 12
+        # assert len(seq_kv) == 12
 
         # Slot encoding
-        slot_ids = self.slot_ids.unsqueeze(0).expand(bs, -1, -1).reshape(bs, total_slot_len)
-        slot_type_ids = self.slot_token_type_ids.unsqueeze(0).expand(bs, -1, -1).reshape(bs, -1)
-        slot_mask = self.slot_to_slot_mask.unsqueeze(0).expand(bs, -1, -1).contiguous()
-        slot_pos_ids = self.slot_pos_ids.unsqueeze(0).expand(bs, -1)
+        slot_ids = slot_ids.unsqueeze(1).expand(-1, ts, -1, -1).reshape(bs, total_slot_len)
+        slot_type_ids = slot_type_ids.unsqueeze(1).expand(-1, ts, -1, -1).reshape(bs, total_slot_len)
+        slot_mask = slot_to_slot_mask.unsqueeze(1).expand(-1, ts, -1, -1).reshape(bs, total_slot_len, total_slot_len)
+        slot_pos_ids = torch.arange(total_slot_len, device=self.device).unsqueeze(0).expand(bs, -1)
         extended_mask = self.utterance_encoder.get_extended_attention_mask(attention_mask, slot_ids.size(),
                                                                            device=slot_ids.device)
         output = self.utterance_encoder(input_ids=slot_ids, attention_mask=slot_mask, token_type_ids=slot_type_ids,
@@ -291,110 +274,26 @@ class BeliefTracker(nn.Module):
                 slot_h, casual_mask,
                 head_mask=self.utterance_encoder.get_head_mask(None, self.nbt_config.num_hidden_layers))[0]
 
-        hidden = hidden.view(ds, slot_dim, ts, -1)
+        hidden = hidden.view(ds, slot_dim, ts, -1).mean(dim=1)
+        q_hidden = hidden[:i_ds].reshape(i_ds, ts, -1)
+        k_hidden = hidden[i_ds:].reshape(i_ds, sample_num, ts, -1)
+        q_hidden = q_hidden.gather(dim=1, index=q_valid_turn.view(i_ds, 1, 1).expand(-1, -1, self.bert_output_dim))
+        k_hidden = k_hidden.gather(
+            index=key_valid_turn.view(i_ds, sample_num, 1, 1).expand(-1, -1, -1, self.bert_output_dim),
+            dim=2).squeeze()
 
-        if self.use_copy:
-            hidden = hidden.transpose(1, 2).reshape(bs, slot_dim, -1)
-            copy_hidden = self.copy_attention(hidden, hidden, hidden,
-                                              attention_mask=self.diagonal_mask, hard=self.hard_copy)
-            gate = torch.sigmoid((self.copy_gate(hidden, copy_hidden)))
-            hidden = gate * copy_hidden + (1 - gate) * hidden
-            hidden = self.copyLayerNorm(self.dropout(hidden)).view(ds, ts, slot_dim, -1).transpose(1, 2)
+        query = self.project1(q_hidden)
+        key = self.project2(k_hidden)
+        logits = query.bmm(key.transpose(1, 2))
 
-        hidden = hidden.transpose(0, 1).contiguous()
-
-        loss = 0
-
-        answer_type_logits = self.classifier(hidden)
-        _, answer_type_pred = answer_type_logits.max(dim=-1)
-
-        hidden = self.hidden_output(hidden)
-
-        # Label (slot-value) encoding
-        loss_slot = [0.] * slot_dim
-        pred_slot = []
-        output = []
-        type_loss = 0.
-        matching_loss = 0.
-
-        hid_label = self.defined_values
-        hid_mask = self.value_mask
-        num_slot_labels = hid_label.size(1)
-
-        if self.distance_metric == 'product':
-            _hid_label = hid_label.unsqueeze(1).unsqueeze(1).repeat(1, ds, ts, 1, 1).view(slot_dim * ds * ts,
-                                                                                          num_slot_labels, -1)
-            _hidden = hidden.reshape(slot_dim * ds * ts, 1, -1)
-            if self.efficient and _hidden.requires_grad:
-                _dist = torch.utils.checkpoint.checkpoint(self.metric, _hidden, _hid_label)
-                _dist = _dist.squeeze(1).reshape(slot_dim, ds, ts, num_slot_labels)
-            else:
-                _dist = self.metric(_hidden, _hid_label).squeeze(1).reshape(slot_dim, ds, ts, num_slot_labels)
-        else:
-            _hid_label = hid_label.unsqueeze(1).unsqueeze(1).repeat(1, ds, ts, 1, 1).view(
-                slot_dim * ds * ts * num_slot_labels, -1)
-            _hidden = hidden.unsqueeze(3).repeat(1, 1, 1, num_slot_labels, 1).reshape(
-                slot_dim * ds * ts * num_slot_labels, -1)
-            if self.efficient and _hidden.requires_grad:
-                _dist = torch.utils.checkpoint.checkpoint(
-                    self.metric, _hid_label, _hidden).view(slot_dim, ds, ts, num_slot_labels)
-            else:
-                _dist = self.metric(_hid_label, _hidden).view(slot_dim, ds, ts, num_slot_labels)
-
-        if self.distance_metric == 'euclidean':
-            _dist = -_dist
-
-        _dist = _dist + hid_mask
-
-        _, pred_slot = torch.max(_dist, -1)
-
-        if labels is not None:
-            # No undefined value fix
-            _loss = self.nll(_dist.reshape(-1, num_slot_labels), labels.permute(2, 0, 1).reshape(-1)) / ds
-            matching_loss += _loss.item()
-            loss += _loss
-            # loss_slot = _loss.detach()
-
-        if answer_type_ids is not None:
-            cls_loss = self.nll(answer_type_logits.reshape(-1, 3), answer_type_ids.permute(2, 0, 1).reshape(-1)) / ds
-            # loss_slot += cls_loss.detach()
-            loss += self.cls_loss_weight * cls_loss
-            type_loss += cls_loss.item()
-
-        if labels is None:
-            return _dist.detach()
-
-        self.update_metric("cls_loss", type_loss)
-        self.update_metric("matching_loss", matching_loss)
-
-        # calculate joint accuracy
-        # pred_slot = torch.cat(pred_slot, 2)  # (ds, ts, slot_dim)
-        pred_slot = pred_slot.permute(1, 2, 0).contiguous().detach()
-        answer_type_pred = answer_type_pred.permute(1, 2, 0).detach()  # (ds, ts, slot_dim)
-        # 1 for `none` and `do not care`
-        classified_mask = ((answer_type_ids != 2) * (answer_type_ids != -1)).view(-1, slot_dim)
-        # mask classifying values as 1
-        value_accuracy = (pred_slot == labels).view(-1, slot_dim).masked_fill(classified_mask, 1)
-        answer_type_accuracy = (answer_type_pred == answer_type_ids).view(-1, slot_dim)
-        # For `none` and `do not care`, value_accuracy is always 1, the final accuracy depends on slot_gate_accuracy
-        # For `ptr`, the final accuracy is 1 if and only if value_accuracy == 1 and slot_gate_accuracy == 1
-        accuracy = value_accuracy * answer_type_accuracy
-        # Slot accuracy
-        slot_data_num = torch.sum(answer_type_ids.view(-1, slot_dim) > -1, dim=0).float()
-        acc_slot = accuracy.sum(dim=0).float() / slot_data_num
-        type_acc_slot = answer_type_accuracy.sum(dim=0).float() / slot_data_num
-        # Joint accuracy
-        valid_turn = torch.sum(answer_type_ids[:, :, 0].view(-1) > -1, dim=0).float()
-        acc = sum(torch.sum(accuracy, dim=1) // slot_dim).float() / valid_turn
-        type_acc = sum(torch.sum(answer_type_accuracy, dim=1) // slot_dim).float() / valid_turn
+        loss = self.nll(logits, label)
+        _, pred = logits.max(dim=-1)
+        acc = torch.sum(pred == label).float() / i_ds
 
         if n_gpu == 1:
-            return loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, torch.cat(
-                [answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1)
+            return loss, acc
         else:
-            return loss.unsqueeze(0), None, acc.unsqueeze(0), type_acc.unsqueeze(0), \
-                   acc_slot.unsqueeze(0), type_acc_slot.unsqueeze(0), \
-                   torch.cat([answer_type_pred.unsqueeze(-1), pred_slot.unsqueeze(-1)], dim=-1).unsqueeze(0)
+            return loss.unsqueeze(0), acc.unsqueeze(0)
 
     @staticmethod
     def init_parameter(module):
@@ -407,20 +306,5 @@ class BeliefTracker(nn.Module):
             torch.nn.init.constant_(module.bias_ih_l0, 0.0)
             torch.nn.init.constant_(module.bias_hh_l0, 0.0)
 
-    def update_metric(self, metric_name, *args, **kwargs):
-        state = 'train' if self.training else 'eval'
-        self.metrics[metric_name][state](*args, **kwargs)
 
-    def get_metric(self, reset=False):
-        state = 'train' if self.training else 'eval'
-        metrics = {}
-        for k, v in self.metrics.items():
-            if state in v:
-                metrics[k] = v[state].get_metric(reset=reset)
-        return metrics
 
-    def get_gate_metric(self, reset=False):
-        metric = torch.cat(self.gate_metric, dim=1).squeeze(-1)
-        if reset:
-            self.gate_metric.clear()
-        return metric
