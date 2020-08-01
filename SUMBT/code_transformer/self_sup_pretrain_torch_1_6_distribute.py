@@ -471,7 +471,7 @@ class ContrastiveDataset(Dataset):
         self.sample_slot_num = sample_slot_num
         self.sample_key_num = sample_key_num
         self.dialog_num = self.features[0].size(0)
-        self.valid_turn = (self.features[0].sum(dim=2) > 0).sum(dim=1)
+        self.valid_turn = (self.features[0].sum(dim=2) > 0).sum(dim=1) - 1
 
     def __len__(self):
         return self.dialog_num
@@ -488,7 +488,7 @@ class ContrastiveDataset(Dataset):
         pos_features = [feature[index] for feature in self.features]
 
         # negative samples
-        negative_sample_index = random.sample(list(range(index)) + list(range(index, self.dialog_num)),
+        negative_sample_index = random.sample(list(range(index)) + list(range(index + 1, self.dialog_num)),
                                               self.sample_key_num)
         assert index not in negative_sample_index
         neg_valid_turn = []
