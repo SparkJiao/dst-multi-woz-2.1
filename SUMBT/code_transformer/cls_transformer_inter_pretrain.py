@@ -75,7 +75,7 @@ class BeliefTracker(nn.Module):
         nbt_config.num_hidden_layers = args.num_layers
         nbt_config.intermediate_size = args.intermediate_size
         nbt_config.num_attention_heads = self.attn_head
-        nbt_config.gradient_checkpointing = True
+        # nbt_config.gradient_checkpointing = True  # there is a bug
         self.nbt_config = nbt_config
 
         self.position_embedding = self.utterance_encoder.bert.embeddings.position_embeddings

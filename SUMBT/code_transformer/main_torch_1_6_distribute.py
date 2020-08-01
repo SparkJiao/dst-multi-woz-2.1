@@ -1278,7 +1278,7 @@ def main():
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 
         eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation,
-                                                    test_file=args.eval_file)
+                                                    test_file=args.dev_file)
         all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
             eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)

@@ -699,7 +699,11 @@ def main():
     parser.add_argument('--test_mode', default=-1, type=int)
 
     parser.add_argument('--remove_unrelated', default=False, action='store_true')
+    parser.add_argument('--use_copy', default=False, action='store_true')
+    parser.add_argument('--hard_copy', default=False, action='store_true')
     parser.add_argument('--efficient', default=False, action='store_true', help='If use checkpoint')
+    parser.add_argument('--add_interaction', default=False, action='store_true')
+    parser.add_argument('--sinusoidal_embeddings', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -845,6 +849,8 @@ def main():
         from cls_transformer_flat import BeliefTracker
     elif args.nbt == 'query':
         from cls_query_transformer import BeliefTracker
+    elif args.nbt == 'copy':
+        from cls_transformer_flat_copy import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
