@@ -79,8 +79,8 @@ class BeliefTracker(nn.Module):
 
         self.position_embedding = self.utterance_encoder.bert.embeddings.position_embeddings
         if args.sinusoidal_embeddings:
-            self.position_embedding = nn.Embedding(args.max_turn + 8, self.bert_output_dim)
-            create_sinusoidal_embeddings(args.max_turn + 8, self.bert_output_dim, self.position_embedding.weight)
+            self.position_embedding = nn.Embedding(args.max_turn_length + 8, self.bert_output_dim)
+            create_sinusoidal_embeddings(args.max_turn_length + 8, self.bert_output_dim, self.position_embedding.weight)
             assert not self.position_embedding.weight.requires_grad
         self.positionLayerNorm = nn.LayerNorm(self.bert_output_dim, eps=nbt_config.layer_norm_eps)
 

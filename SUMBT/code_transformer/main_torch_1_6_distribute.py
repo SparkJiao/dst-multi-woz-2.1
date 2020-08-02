@@ -867,6 +867,7 @@ def main():
         pre_train = torch.load(args.pretrain)
         pre_train_state_dict = get_pretrain(model, pre_train)
         model.load_state_dict(pre_train_state_dict)
+        del pre_train
 
     # if args.fp16:
     #     model.half()
