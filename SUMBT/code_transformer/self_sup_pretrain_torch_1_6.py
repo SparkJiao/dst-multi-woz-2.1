@@ -811,9 +811,9 @@ def main():
     if args.do_train:
         train_examples = processor.get_train_examples(args.data_dir, accumulation=accumulation,
                                                       train_file=args.train_file)
-        # dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation, dev_file=args.dev_file)
+        dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation, dev_file=args.dev_file)
 
-        ## Training utterances
+        # Training utterances
         all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
@@ -838,20 +838,22 @@ def main():
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size,
                                       pin_memory=True, num_workers=4)
 
-        ## Dev utterances
-        # all_input_ids_dev, all_input_len_dev, all_answer_type_ids_dev, all_label_ids_dev = convert_examples_to_features(
-        #     dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-        # all_token_type_ids_dev, all_input_mask_dev = make_aux_tensors(all_input_ids_dev, all_input_len_dev)
-        # num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
-        #
-        # logger.info("***** Running validation *****")
-        # logger.info("  Num examples = %d", len(dev_examples))
-        # logger.info("  Batch size = %d", args.dev_batch_size)
-        # logger.info("  Num steps = %d", num_dev_steps)
-        #
-        # dev_data = ContrastiveDataset(len(label_list), all_input_ids_dev, all_token_type_ids_dev, all_input_mask_dev)
-        # dev_sampler = SequentialSampler(dev_data)
-        # dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.dev_batch_size)
+        # Dev utterances
+        all_input_ids_dev, all_input_len_dev, all_answer_type_ids_dev, all_label_ids_dev = convert_examples_to_features(
+            dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
+        all_token_type_ids_dev, all_input_mask_dev = make_aux_tensors(all_input_ids_dev, all_input_len_dev)
+        num_dev_steps = int(all_input_ids_dev.size(0) / args.dev_batch_size * args.num_train_epochs)
+
+        logger.info("***** Running validation *****")
+        logger.info("  Num examples = %d", len(dev_examples))
+        logger.info("  Batch size = %d", args.dev_batch_size)
+        logger.info("  Num steps = %d", num_dev_steps)
+
+        dev_data = ContrastiveDataset(len(label_list), all_input_ids_dev, all_token_type_ids_dev, all_input_mask_dev,
+                                      sample_slot_num=args.sample_slot_num, sample_key_num=args.sample_key_num,
+                                      fix_dataset=True, fix_sample_num=args.fix_sample_num)
+        dev_sampler = SequentialSampler(dev_data)
+        dev_dataloader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args.eval_batch_size)
 
     logger.info("Loaded data!")
 
@@ -875,26 +877,21 @@ def main():
         pre_train_state_dict = get_pretrain(model, pre_train)
         model.load_state_dict(pre_train_state_dict)
 
-    # if args.fp16:
-    #     model.half()
     model.to(device)
-    # model.to(torch.device('cuda:0'))
 
-    ## Get slot-value embeddings
+    # Get slot-value embeddings
     label_token_ids, label_len = [], []
     for labels in label_list:
         token_ids, lens = get_label_embedding(labels, args.max_label_length, tokenizer, device)
         label_token_ids.append(token_ids)
         label_len.append(lens)
 
-    ## Get domain-slot-type embeddings
+    # Get domain-slot-type embeddings
     slot_token_ids, slot_len = \
         get_label_embedding(processor.target_slot, args.max_slot_length, tokenizer, device)
 
-    ## Initialize slot and value embeddings
+    # Initialize slot and value embeddings
     model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
-    # model.to(torch.device('cpu'))
-    # model.to(device)
 
     # Prepare optimizer
     if args.do_train:
@@ -941,7 +938,7 @@ def main():
         logger.info("Training...")
 
         global_step = 0
-
+        best_loss = 1000000000.0
         for epoch in trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]):
             # Train
             model.train()
@@ -954,7 +951,6 @@ def main():
                 model.train()
 
                 batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-                # input_ids, token_type_ids, input_mask, answer_type_ids, label_ids = batch
 
                 # Forward
                 if n_gpu == 1:
@@ -993,126 +989,57 @@ def main():
                         summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
 
                     if args.local_rank in [-1, 0] and global_step % args.per_eval_steps == 0:
-                        # Save model checkpoint
-                        output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
-                        if not os.path.exists(output_dir):
-                            os.makedirs(output_dir)
-                        model_to_save = (
-                            model.module if hasattr(model, "module") else model
-                        )  # Take care of distributed/parallel training
-                        torch.save(model_to_save.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+                        # Evaluation on dev set
+                        total_loss = 0
+                        total_acc = 0
+                        if args.local_rank == -1:
+                            model.eval()
+                            for eval_batch in tqdm(dev_dataloader, desc="Evaluating"):
+                                eval_batch = tuple(t.to(device=device, non_blocking=True) for t in eval_batch)
 
-                        torch.save(args, os.path.join(output_dir, "training_args.bin"))
-                        logger.info("Saving model checkpoint to %s", output_dir)
+                                with torch.no_grad():
+                                    with torch.cuda.amp.autocast():
+                                        if n_gpu == 1:
+                                            loss, acc = model(*eval_batch, n_gpu)
+                                        else:
+                                            loss, acc = model(*eval_batch, n_gpu)
+                                total_loss += loss * eval_batch[0].size(0)
+                                total_acc += acc * eval_batch[0].size(0)
 
-                        torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                        torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                        logger.info("Saving optimizer and scheduler states to %s", output_dir)
+                            total_loss = total_loss / len(dev_dataloader)
+                            total_acc = total_acc / len(dev_dataloader)
 
-    ###############################################################################
-    # Evaluation
-    ###############################################################################
+                            out_file_name = f'eval_results'
+                            if args.target_slot == 'all':
+                                out_file_name += '_all'
+                            output_eval_file = os.path.join(args.output_dir, "%s.txt" % out_file_name)
 
-    if args.local_rank not in [-1, 0]:
-        return
-    # Load a trained model that you have fine-tuned
-    predict_dir = args.predict_dir if args.predict_dir is not None else args.output_dir
-    best_checkpoint = None
-    best_dev_acc = 0.0
-    best_loss = 10000000
-    if not os.path.exists(predict_dir):
-        os.makedirs(predict_dir, exist_ok=True)
+                            with open(output_eval_file, "w") as writer:
+                                logger.info("***** Eval results *****")
+                                logger.info(f"Accuracy: {total_acc}")
+                                logger.info(f"Loss: {total_loss}")
+                                logger.info(f"Global Step: {global_step}")
 
-    eval_examples = processor.get_dev_examples(args.data_dir, accumulation=False, dev_file=args.dev_file)
-    all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
-        eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
-    all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)
+                                writer.write("%s = %s\n" % ('Accuracy', str(total_acc)))
+                                writer.write("%s = %s\n" % ('Loss', str(total_loss)))
+                                writer.write(f'global step = {global_step}')
 
-    logger.info("***** Running evaluation *****")
-    logger.info("  Num examples = %d", len(eval_examples))
-    logger.info("  Batch size = %d", args.eval_batch_size)
+                            if total_loss < best_loss:
+                                best_loss = total_loss
 
-    eval_data = ContrastiveDataset(len(label_list), all_input_ids, all_token_type_ids, all_input_mask,
-                                   sample_slot_num=args.sample_slot_num, sample_key_num=args.sample_key_num,
-                                   fix_dataset=True, fix_sample_num=args.fix_sample_num)
+                                # Save model together with optimizer and args for resume
+                                model_to_save = (
+                                    model.module if hasattr(model, "module") else model
+                                )  # Take care of distributed/parallel training
+                                torch.save(model_to_save.state_dict(),
+                                           os.path.join(args.output_dir, "pytorch_model.bin"))
 
-    # Run prediction for full data
-    eval_sampler = SequentialSampler(eval_data)
-    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+                                torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
+                                logger.info("Saving model checkpoint to %s", args.output_dir)
 
-    # for state_name in ['pytorch_model.bin', 'pytorch_model_loss.bin']:
-    # for state_name in ['pytorch_model.bin']:
-    for checkpoint in os.listdir(args.output_dir):
-        if not os.path.isdir(os.path.join(args.output_dir, checkpoint)):
-            continue
-        state_name = checkpoint
-        checkpoint = os.path.join(checkpoint, "pytorch_model.bin")
-
-        if not os.path.exists(os.path.join(args.output_dir, checkpoint)):
-            continue
-        model = BeliefTracker(args, num_labels, device)
-        logger.info(f'Loading saved model from {os.path.join(args.output_dir, checkpoint)}')
-        output_model_file = os.path.join(args.output_dir, checkpoint)
-
-        # in the case that slot and values are different between the training and evaluation
-        ptr_model = torch.load(output_model_file)
-        # Initialize slot value look up to avoid mismatch
-        for k in list(ptr_model.keys()):
-            if 'slot_lookup' in k or 'value_lookup' in k:
-                ptr_model.pop(k)
-
-        if n_gpu == 1:
-            state = model.state_dict()
-            state.update(ptr_model)
-            state = get_pretrain(model, state)
-            model.load_state_dict(state)
-        else:
-            print("Evaluate using only one device!")
-            model.module.load_state_dict(ptr_model)
-
-        model.to(device)
-        model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
-
-        total_loss = 0
-        total_acc = 0
-        # Evaluation on dev set
-        if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-
-            model.eval()
-
-            for batch in tqdm(eval_dataloader, desc="Evaluating"):
-                batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
-
-                with torch.no_grad():
-                    with torch.cuda.amp.autocast():
-                        if n_gpu == 1:
-                            loss, acc = model(*batch, n_gpu)
-                        else:
-                            loss, acc = model(*batch, n_gpu)
-                total_loss += loss * batch[0].size(0)
-                total_acc += acc * batch[0].size(0)
-
-            total_loss = total_loss / all_input_ids.size(0)
-            total_acc = total_acc / all_input_ids.size(0)
-
-            out_file_name = f'eval_results_{state_name}'
-            if args.target_slot == 'all':
-                out_file_name += '_all'
-            output_eval_file = os.path.join(predict_dir, "%s.txt" % out_file_name)
-
-            with open(output_eval_file, "w") as writer:
-                logger.info("***** Eval results *****")
-                logger.info(f"Accuracy: {total_acc}")
-                logger.info(f"Loss: {total_loss}")
-
-                writer.write("%s = %s\n" % ('Accuracy', str(total_acc)))
-                writer.write("%s = %s\n" % ('Loss', str(total_loss)))
-
-            if total_loss < best_loss:
-                best_loss = total_loss
-                best_checkpoint = state_name
-
-    logger.info(f'Best checkpoint: {best_checkpoint}')
+                                torch.save(optimizer.state_dict(), os.path.join(args.output_dir, "optimizer.pt"))
+                                torch.save(scheduler.state_dict(), os.path.join(args.output_dir, "scheduler.pt"))
+                                logger.info("Saving optimizer and scheduler states to %s", args.output_dir)
 
 
 if __name__ == "__main__":
