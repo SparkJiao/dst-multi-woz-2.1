@@ -1,9 +1,8 @@
-import torch
-from torch import nn
-from torch.nn import functional
 import math
 
-from transformers.modeling_bert import BertSelfAttention, BertAttention, BertConfig, ACT2FN
+import torch
+from torch import nn
+from transformers.modeling_bert import BertSelfAttention, ACT2FN
 
 
 class GraphAttention(nn.Module):
@@ -85,7 +84,8 @@ class BiGraphSelfAttention(BertSelfAttention):
 
         hidden = outputs[0]
 
-        cls_h = hidden.index_select(index=self.cls_index, dim=1)
+        # cls_h = hidden.index_select(index=self.cls_index, dim=1)
+        cls_h = hidden[:, self.cls_index]
         bs, seq_len, dim = cls_h.size()
 
         if self.mask_self:
@@ -99,10 +99,15 @@ class BiGraphSelfAttention(BertSelfAttention):
         ds = cls_turn_h.size(0)
         cls_turn_h = cls_turn_h.transpose(1, 2).reshape(ds * seq_len, self.dialog_turns, dim)
 
-        dial_hidden = self.turn_gat(cls_turn_h, mask=self.dialog_mask)
+        dial_hidden = self.turn_gat(cls_turn_h,
+                                    mask=self.dialog_mask.unsqueeze(0).expand(ds * seq_len, -1, -1))
+        dial_hidden = dial_hidden.reshape(
+            ds, seq_len, self.dialog_turns, dim).transpose(1, 2).reshape(
+            bs, seq_len, dim)
 
         cls_h = self.fuse_f(torch.cat([cls_h, slot_hidden, dial_hidden], dim=-1))
 
         res = hidden.clone()
-        res = res.scatter_(index=self.cls_index, dim=1, src=cls_h)
+        # res = res.scatter_(index=self.cls_index, dim=1, src=cls_h)
+        res[:, self.cls_index] = cls_h
         return (res,) + outputs[1:]
