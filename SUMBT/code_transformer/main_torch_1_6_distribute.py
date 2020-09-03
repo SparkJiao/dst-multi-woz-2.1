@@ -738,7 +738,8 @@ def main():
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     # Tensorboard logging
-    tb_file_name = '/'.join(args.output_dir.split('/')[1:])
+    # tb_file_name = '/'.join(args.output_dir.split('/')[1:])
+    tb_file_name = '/'.join(args.output_dir.split('/')[2:])
     if args.local_rank in [-1, 0]:
         if not args.do_not_use_tensorboard:
             summary_writer = SummaryWriter("./%s/%s" % (args.tf_dir, tb_file_name))

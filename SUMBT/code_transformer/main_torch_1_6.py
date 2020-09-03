@@ -705,6 +705,11 @@ def main():
     parser.add_argument('--add_interaction', default=False, action='store_true')
     parser.add_argument('--sinusoidal_embeddings', default=False, action='store_true')
 
+    parser.add_argument('--cls_n_head', default=6, type=int)
+    parser.add_argument('--cls_d_head', default=128, type=int)
+    parser.add_argument('--graph_residual', default=True, action='store_true')
+    parser.add_argument('--graph_add_layers', default='9,10,11', type=str)
+
     args = parser.parse_args()
 
     # check output_dir
@@ -851,6 +856,8 @@ def main():
         from cls_query_transformer import BeliefTracker
     elif args.nbt == 'copy':
         from cls_transformer_flat_copy import BeliefTracker
+    elif args.nbt == 'bi_graph':
+        from cls_transformer_bi_mask import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

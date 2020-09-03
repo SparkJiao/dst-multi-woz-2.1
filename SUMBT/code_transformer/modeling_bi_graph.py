@@ -28,8 +28,8 @@ class GraphAttention(nn.Module):
     def forward(self, hidden, mask=None):
         batch, seq_len, dim = hidden.size()
 
-        q = self.graph_q(hidden).view(batch, seq_len, self.cls_n_head, self.cls_d_model)
-        kv = self.graph_kv(hidden).view(batch, seq_len, self.cls_n_head, self.cls_d_model)
+        q = self.graph_q(hidden).view(batch, seq_len, self.cls_n_head, self.cls_d_head)
+        kv = self.graph_kv(hidden).view(batch, seq_len, self.cls_n_head, self.cls_d_head)
 
         scores = torch.einsum("bmhd,bnhd->bhmn", q, kv)
         scores = scores / math.sqrt(self.cls_d_head)

@@ -44,7 +44,6 @@ class BertForUtteranceEncoding(BertPreTrainedModel):
             for x in graph_add_layers:
                 self.bert.encoder.layer[x].attention.self = BiGraphSelfAttention(config)
 
-
     def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
                 inputs_embeds=None, **kwargs):
         return self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids,
@@ -61,7 +60,7 @@ class BeliefTracker(nn.Module):
         self.num_labels = num_labels
         self.num_slots = len(num_labels)
         self.attn_head = args.attn_head
-        self.max_turns = args.max_turns
+        self.max_turns = args.max_turn_length
         self.device = device
 
         # values Encoder (not trainable)
@@ -164,12 +163,13 @@ class BeliefTracker(nn.Module):
             self.max_seq_length, slot_dim * slot_len)
 
         # [seq_len + slot_dim * slot_len, slot_dim * slot_len]
-        seq_to_slot_mask = torch.cat([seq_to_slot_mask, slot_to_slot_mask], dim=1)
+        seq_to_slot_mask = torch.cat([seq_to_slot_mask, slot_to_slot_mask], dim=0)
 
         utt_pos_ids = torch.arange(self.max_seq_length, device=self.device, dtype=torch.long)
-        slot_pos_ids = self.max_seq_length + torch.arange(self.max_slot_length, device=self.device, dtype=torch.long)
-        slot_pos_ids = slot_pos_ids.unsqueeze(0).repeat(slot_dim, 1).reshape(slot_dim * self.max_slot_length)
+        slot_pos_ids = self.max_seq_length + torch.arange(slot_len, device=self.device, dtype=torch.long)
+        slot_pos_ids = slot_pos_ids.unsqueeze(0).repeat(slot_dim, 1).reshape(slot_dim * slot_len)
         pos_ids = torch.cat([utt_pos_ids, slot_pos_ids], dim=-1)
+        # print(pos_ids)
 
         self.register_buffer("slot_ids", slot_ids.reshape(slot_dim * slot_len))
         if slot_token_type_ids is None:
@@ -247,13 +247,14 @@ class BeliefTracker(nn.Module):
         attention_mask = torch.cat([
             attention_mask.unsqueeze(1).expand(
                 -1, slot_dim * self.max_slot_length + self.max_seq_length, -1),
-            self.seq_to_slot_mask
+            self.seq_to_slot_mask.unsqueeze(0).expand(bs, -1, -1)
         ], dim=-1)
-        position_ids = self.slot_ids.unsqueeze(0).expand(bs, -1)
+        # position_ids = self.slot_ids.unsqueeze(0).expand(bs, -1)
+        position_ids = self.pos_ids.unsqueeze(0).expand(bs, -1)
 
         for x in self.graph_add_layers:
             self.utterance_encoder.bert.encoder.layer[x].attention.self.set_slot_dim(
-                self.cls_index, ts, self.casual_mask)
+                self.cls_index, ts, self.casual_mask[:ts, :ts])
 
         outputs = self.utterance_encoder(input_ids=input_ids,
                                          token_type_ids=token_type_ids,
@@ -264,7 +265,7 @@ class BeliefTracker(nn.Module):
         hidden = seq_hidden[:, self.cls_index[1:]]
         assert hidden.size(1) == slot_dim
 
-        hidden = hidden.reshape(ds, ts, slot_dim, -1)
+        hidden = hidden.transpose(0, 1).reshape(slot_dim, ds, ts, -1)
         # hidden = hidden.view(ds, slot_dim, ts, -1)
 
         # if self.use_copy:
