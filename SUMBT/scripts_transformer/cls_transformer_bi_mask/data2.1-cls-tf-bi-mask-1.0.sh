@@ -28,7 +28,7 @@ code_transformer/main_torch_1_6.py --do_train --do_eval --num_train_epochs 30 --
 --tf_dir share/tensorboard --max_seq_length 64 --max_turn_length 22 \
 --gradient_accumulation_steps 16 \
 --max_label_length 20 --max_slot_length 6  \
---train_file data/multiwoz2.1_5/dev-5-full-value.tsv \
+--train_file data/multiwoz2.1_5/train-5-full-value.tsv \
 --dev_file data/multiwoz2.1_5/dev-5-full-value.tsv \
 --test_file data/multiwoz2.1_5/test-5-full-value.tsv \
 --ontology data/multiwoz2.1_5/ontology-full.json \

@@ -722,7 +722,7 @@ def main():
 
     # Tensorboard logging
     if not args.do_not_use_tensorboard:
-        tb_file_name = '/'.join(args.output_dir.split('/')[1:])
+        tb_file_name = '/'.join(args.output_dir.split('/')[2:])
         summary_writer = SummaryWriter("./%s/%s" % (args.tf_dir, tb_file_name))
     else:
         summary_writer = None
