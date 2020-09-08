@@ -1269,15 +1269,16 @@ def main():
                     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
-                    if n_gpu == 1:
-                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
-                    else:
-                        loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
-                        nbatch = label_ids.size(0)
-                        nslot = pred_slot.size(3)
-                        pred_slot = pred_slot.view(nbatch, -1, nslot)
+                    with torch.cuda.amp.autocast():
+                        if n_gpu == 1:
+                            loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
+                                = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        else:
+                            loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
+                                = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                            nbatch = label_ids.size(0)
+                            nslot = pred_slot.size(3)
+                            pred_slot = pred_slot.view(nbatch, -1, nslot)
 
                 accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
                 predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor,
