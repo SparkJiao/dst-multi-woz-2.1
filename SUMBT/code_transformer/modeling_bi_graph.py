@@ -3,7 +3,6 @@ import math
 import torch
 from torch import nn
 from transformers.modeling_bert import BertSelfAttention, ACT2FN
-from transformers.modeling_xlnet import XLNetRelativeAttention
 
 
 class GraphAttention(nn.Module):
@@ -72,6 +71,15 @@ class RelPosGraphAttention(nn.Module):
             self.graph_act_fn = config.hidden_act
 
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.config = config
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for param in [
+            self.q, self.kv, self.r, self.r_r_bias, self.r_w_bias
+        ]:
+            param.data.normal_(mean=0.0, std=self.config.initializer_range)
 
     @staticmethod
     def rel_shift_bnij(x, klen=-1):
@@ -148,7 +156,7 @@ class BiGraphSelfAttention(BertSelfAttention):
         self.dialog_mask = dialog_mask
 
     @staticmethod
-    def position_embedding(pos_seq, inv_freq, bsz=None):
+    def positional_embedding(pos_seq, inv_freq, bsz=None):
         sinusoid_inp = torch.einsum("i,d->id", pos_seq, inv_freq)
         pos_emb = torch.cat([torch.sin(sinusoid_inp), torch.cos(sinusoid_inp)], dim=-1)
         pos_emb = pos_emb[None, :, :]
@@ -169,7 +177,7 @@ class BiGraphSelfAttention(BertSelfAttention):
         fwd_pos_seq = torch.arange(beg, end, -1.0)
         pos_emb = self.positional_embedding(fwd_pos_seq, inv_freq, bsz)
 
-        pos_emb = pos_emb.to(self.device)
+        # pos_emb = pos_emb.to(self.device)
         return pos_emb
 
     def forward(self,
@@ -205,6 +213,7 @@ class BiGraphSelfAttention(BertSelfAttention):
         cls_turn_h = cls_turn_h.transpose(1, 2).reshape(ds * seq_len, self.dialog_turns, dim)
 
         turn_pos_emb = self.relative_positional_encoding(self.dialog_turns, self.dialog_turns, ds * seq_len)
+        turn_pos_emb = turn_pos_emb.to(dtype=cls_turn_h.dtype, device=cls_turn_h.device)
 
         dial_hidden = self.turn_gat(cls_turn_h,
                                     pos_emb=turn_pos_emb,
