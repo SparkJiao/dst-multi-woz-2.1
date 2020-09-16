@@ -23,7 +23,10 @@ class GraphAttention(nn.Module):
         else:
             self.graph_act_fn = config.hidden_act
 
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        if config.graph_no_dropout:
+            self.dropout = lambda x: x
+        else:
+            self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden, mask=None):
         batch, seq_len, dim = hidden.size()
@@ -41,6 +44,8 @@ class GraphAttention(nn.Module):
 
         res = torch.einsum("bhmn,bnhd->bmhd", alpha, kv).reshape(batch, seq_len, dim)
         res = self.graph_update(res)
+        res = self.dropout(res)
+
         if self.graph_residual:
             res = hidden + res
         res = self.graph_act_fn(res)
@@ -70,7 +75,11 @@ class RelPosGraphAttention(nn.Module):
         else:
             self.graph_act_fn = config.hidden_act
 
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        if config.graph_no_dropout:
+            self.dropout = lambda x: x
+        else:
+            self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
         self.config = config
 
         self._init_weights()
@@ -141,7 +150,7 @@ class BiGraphSelfAttention(BertSelfAttention):
         self.fuse_f = nn.Linear(config.hidden_size * 3, config.hidden_size)
 
         # self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        # self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)  # Version 2.1
 
         self.mask_self = config.mask_self
         self.d_model = config.hidden_size
@@ -149,6 +158,7 @@ class BiGraphSelfAttention(BertSelfAttention):
         self.cls_index = None
         self.dialog_turns = None
         self.dialog_mask = None
+        self.graph_no_dropout = config.graph_no_dropout
 
     def set_slot_dim(self, cls_index, dialog_turns, dialog_mask):
         self.cls_index = cls_index
@@ -223,8 +233,11 @@ class BiGraphSelfAttention(BertSelfAttention):
             ds, seq_len, self.dialog_turns, dim).transpose(1, 2).reshape(
             bs, seq_len, dim)
 
-        cls_h = self.fuse_f(torch.cat([cls_h, slot_hidden, dial_hidden], dim=-1))
-        # cls_h = self.LayerNorm(self.dropout(cls_h))
+        cls_up_h = self.fuse_f(torch.cat([cls_h, slot_hidden, dial_hidden], dim=-1))
+        # Version 2.1
+        if not self.graph_no_dropout:
+            cls_up_h = self.dropout(cls_up_h)
+        cls_h = self.LayerNorm(cls_h + cls_up_h).to(dtype=hidden.dtype)
 
         res = hidden.clone()
         # res = res.scatter_(index=self.cls_index, dim=1, src=cls_h)

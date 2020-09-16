@@ -709,6 +709,7 @@ def main():
     parser.add_argument('--cls_d_head', default=128, type=int)
     parser.add_argument('--graph_residual', default=True, action='store_true')
     parser.add_argument('--graph_add_layers', default='9,10,11', type=str)
+    parser.add_argument('--graph_no_dropout', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -818,7 +819,7 @@ def main():
             train_sampler = DistributedSampler(train_data)
 
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size,
-                                      pin_memory=True, num_workers=4)
+                                      pin_memory=True)
 
         ## Dev utterances
         all_input_ids_dev, all_input_len_dev, all_answer_type_ids_dev, all_label_ids_dev = convert_examples_to_features(
@@ -887,8 +888,6 @@ def main():
 
     ## Initialize slot and value embeddings
     model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
-    # model.to(torch.device('cpu'))
-    # model.to(device)
 
     # Prepare optimizer
     if args.do_train:
@@ -913,19 +912,6 @@ def main():
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(t_total * args.warmup_proportion),
                                                     num_training_steps=t_total)
 
-        # if args.fp16:
-        #     # try:
-        #     #     from apex import amp
-        #     # except ImportError:
-        #     #     raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-
-        #     # if args.max_loss_scale is not None:
-        #     #     model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level, max_loss_scale=args.max_loss_scale)
-        #     # else:
-        #     #     model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
-        #     scaler = torch.cuda.amp.GradScaler()
-        # else:
-        #     scaler = None
         scaler = torch.cuda.amp.GradScaler()
 
         logger.info(optimizer)
@@ -987,27 +973,12 @@ def main():
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
 
-                # Backward
-                # if args.fp16:
-                #     scaler.scale(loss).backward()
-                #     # with amp.scale_loss(loss, optimizer) as scaled_loss:
-                #         # scaled_loss.backward()
-                # else:
-                #     loss.backward()
                 scaler.scale(loss).backward()
 
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    # modify lealrning rate with special warm up BERT uses
-                    # if args.fp16:
-                    #     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-                    #     scaler.step(optimizer)
-                    #     scaler.update()
-                    # else:
-                    #     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                    #     optimizer.step()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                     scaler.step(optimizer)
@@ -1025,11 +996,6 @@ def main():
                         summary_writer.add_scalar("Train/JointAcc", acc, global_step)
                         summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
                         if n_gpu == 1:
-                            # for i, slot in enumerate(processor.target_slot):
-                            #     summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
-                            #                               global_step)
-                            #     summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
-                            #                               global_step)
                             if hasattr(model, "get_metric"):
                                 metric = model.get_metric(reset=False)
                                 for k, v in metric.items():
@@ -1110,13 +1076,6 @@ def main():
                             summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
                             summary_writer.add_scalar("Validate/Cls_Acc", dev_type_acc, global_step)
                             if n_gpu == 1:
-                                # for i, slot in enumerate(processor.target_slot):
-                                #     summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
-                                #                               dev_loss_slot[i] / all_input_ids_dev.size(0), global_step)
-                                #     summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i],
-                                #                               global_step)
-                                #     summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
-                                #                               global_step)
                                 if hasattr(model, "get_metric"):
                                     metric = model.get_metric(reset=True)
                                     for k, v in metric.items():

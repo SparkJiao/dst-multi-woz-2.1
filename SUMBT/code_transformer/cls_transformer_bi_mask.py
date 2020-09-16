@@ -30,13 +30,15 @@ class BertForUtteranceEncoding(BertPreTrainedModel):
                  cls_d_head=None,
                  graph_residual=None,
                  mask_self=None,
-                 graph_add_layers=None):
+                 graph_add_layers=None,
+                 graph_no_dropout=False):
         super(BertForUtteranceEncoding, self).__init__(config)
 
         config.cls_n_head = cls_n_head
         config.cls_d_head = cls_d_head
         config.graph_residual = graph_residual
         config.mask_self = mask_self
+        config.graph_no_dropout = graph_no_dropout
         self.config = config
         self.bert = BertModel(config)
 
@@ -81,7 +83,9 @@ class BeliefTracker(nn.Module):
                                                                           cls_d_head=args.cls_d_head,
                                                                           graph_residual=args.graph_residual,
                                                                           mask_self=args.mask_self,
-                                                                          graph_add_layers=self.graph_add_layers)
+                                                                          graph_add_layers=self.graph_add_layers,
+                                                                          graph_no_dropout=args.graph_no_dropout)
+
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob if args.dropout is None else args.dropout
         logger.info(f'Dropout prob: {self.hidden_dropout_prob}')
@@ -177,9 +181,9 @@ class BeliefTracker(nn.Module):
         self.register_buffer("slot_token_type_ids", slot_token_type_ids.reshape(slot_dim * slot_len))
         self.register_buffer("slot_mask", slot_mask)
         self.register_buffer("seq_to_slot_mask", seq_to_slot_mask)
-        self.register_buffer("slot_to_slot_mask", slot_to_slot_mask)
+        # self.register_buffer("slot_to_slot_mask", slot_to_slot_mask)
         self.register_buffer("pos_ids", pos_ids)
-        self.register_buffer("slot_pos_ids", slot_pos_ids)
+        # self.register_buffer("slot_pos_ids", slot_pos_ids)
 
         turn_ids = torch.arange(self.max_turns, dtype=torch.long, device=self.device)
         casual_mask = (turn_ids[None, :] <= turn_ids[:, None]).float()
