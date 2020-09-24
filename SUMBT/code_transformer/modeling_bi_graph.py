@@ -159,6 +159,7 @@ class BiGraphSelfAttention(BertSelfAttention):
         self.dialog_turns = None
         self.dialog_mask = None
         self.graph_no_dropout = config.graph_no_dropout
+        self.graph_no_layer_norm = config.graph_no_layer_norm
 
     def set_slot_dim(self, cls_index, dialog_turns, dialog_mask):
         self.cls_index = cls_index
@@ -237,7 +238,125 @@ class BiGraphSelfAttention(BertSelfAttention):
         # Version 2.1
         if not self.graph_no_dropout:
             cls_up_h = self.dropout(cls_up_h)
-        cls_h = self.LayerNorm(cls_h + cls_up_h).to(dtype=hidden.dtype)
+
+        cls_h = cls_h + cls_up_h
+        if not self.graph_no_layer_norm:
+            cls_h = self.LayerNorm(cls_h).to(dtype=hidden.dtype)
+
+        res = hidden.clone()
+        # res = res.scatter_(index=self.cls_index, dim=1, src=cls_h)
+        # res[:, self.cls_index] = cls_h.to(dtype=res.dtype)
+        res[:, self.cls_index] = cls_h
+        return (res,) + outputs[1:]
+
+
+class PositionalEncoding(nn.Module):
+    "Implement the PE function."
+
+    def __init__(self, d_model, dropout, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model, requires_grad=False)
+        position = torch.arange(0., max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0., d_model, 2) *
+                             -(math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
+
+
+class FixBiGraphSelfAttention(BertSelfAttention):
+    def __init__(self, config, add_pos_emb=False):
+        super().__init__(config)
+
+        self.slot_gat = GraphAttention(config)
+        self.turn_gat = GraphAttention(config)
+
+        self.fuse_f = nn.Linear(config.hidden_size * 3, config.hidden_size)
+
+        self.posLayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+        self.mask_self = config.mask_self
+        self.d_model = config.hidden_size
+
+        self.cls_index = None
+        self.dialog_turns = None
+        self.dialog_mask = None
+        self.graph_no_dropout = config.graph_no_dropout
+        self.graph_no_layer_norm = config.graph_no_layer_norm
+
+        self.add_pos_emb = add_pos_emb
+        self.pos_encoding = PositionalEncoding(self.d_model, config.hidden_dropout_prob, 30)
+
+    def set_slot_dim(self, cls_index, dialog_turns, dialog_mask):
+        self.cls_index = cls_index
+        self.dialog_turns = dialog_turns
+        self.dialog_mask = dialog_mask
+
+    def forward(self,
+                hidden_states,
+                attention_mask=None,
+                head_mask=None,
+                encoder_hidden_states=None,
+                encoder_attention_mask=None,
+                output_attentions=False,
+                ):
+        outputs = super().forward(hidden_states=hidden_states,
+                                  attention_mask=attention_mask,
+                                  head_mask=head_mask,
+                                  encoder_hidden_states=encoder_hidden_states,
+                                  encoder_attention_mask=encoder_attention_mask,
+                                  output_attentions=output_attentions)
+
+        hidden = outputs[0]
+
+        # cls_h = hidden.index_select(index=self.cls_index, dim=1)
+        cls_h = hidden[:, self.cls_index]
+        bs, seq_len, dim = cls_h.size()
+
+        if self.mask_self:
+            mask = torch.eye(seq_len).unsqueeze(0).expand(bs, -1, -1)
+        else:
+            mask = None
+
+        slot_hidden = self.slot_gat(cls_h, mask=mask)
+
+        cls_turn_h = cls_h.reshape(-1, self.dialog_turns, seq_len, dim)
+        ds = cls_turn_h.size(0)
+        cls_turn_h = cls_turn_h.transpose(1, 2).reshape(ds * seq_len, self.dialog_turns, dim)
+
+        # turn_pos_emb = self.relative_positional_encoding(self.dialog_turns, self.dialog_turns, ds * seq_len)
+        # turn_pos_emb = turn_pos_emb.to(dtype=cls_turn_h.dtype, device=cls_turn_h.device)
+
+        if self.add_pos_emb:
+            # cls_turn_h = cls_turn_h + turn_pos_emb
+            cls_turn_h = self.pos_encoding(cls_turn_h)
+            if not self.graph_no_layer_norm:
+                cls_turn_h = self.posLayerNorm(cls_turn_h)
+
+        dial_hidden = self.turn_gat(cls_turn_h,
+                                    mask=self.dialog_mask.unsqueeze(0).expand(ds * seq_len, -1, -1))
+
+        dial_hidden = dial_hidden.reshape(
+            ds, seq_len, self.dialog_turns, dim).transpose(1, 2).reshape(
+            bs, seq_len, dim)
+
+        cls_up_h = self.fuse_f(torch.cat([cls_h, slot_hidden, dial_hidden], dim=-1))
+        # Version 2.1
+        if not self.graph_no_dropout:
+            cls_up_h = self.dropout(cls_up_h)
+
+        cls_h = cls_h + cls_up_h
+        if not self.graph_no_layer_norm:
+            cls_h = self.LayerNorm(cls_h).to(dtype=hidden.dtype)
 
         res = hidden.clone()
         # res = res.scatter_(index=self.cls_index, dim=1, src=cls_h)

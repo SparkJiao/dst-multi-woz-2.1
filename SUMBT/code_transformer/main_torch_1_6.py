@@ -710,6 +710,8 @@ def main():
     parser.add_argument('--graph_residual', default=True, action='store_true')
     parser.add_argument('--graph_add_layers', default='9,10,11', type=str)
     parser.add_argument('--graph_no_dropout', default=False, action='store_true')
+    parser.add_argument('--graph_no_layer_norm', default=False, action='store_true')
+    parser.add_argument('--pos_emb_per_layer', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -859,6 +861,8 @@ def main():
         from cls_transformer_flat_copy import BeliefTracker
     elif args.nbt == 'bi_graph':
         from cls_transformer_bi_mask import BeliefTracker
+    elif args.nbt == 'bi_graph_fix':
+        from cls_transformer_bi_mask_fix import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 

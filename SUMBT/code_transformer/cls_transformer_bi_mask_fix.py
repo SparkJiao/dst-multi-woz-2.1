@@ -12,12 +12,12 @@ try:
     from . import layers
     from .metric import Average
     from .global_logger import get_child_logger
-    from .modeling_bi_graph import BiGraphSelfAttention
+    from .modeling_bi_graph import FixBiGraphSelfAttention
 except ImportError:
     import layers
     from metric import Average
     from global_logger import get_child_logger
-    from modeling_bi_graph import BiGraphSelfAttention
+    from modeling_bi_graph import FixBiGraphSelfAttention
 
 logger: Logger = get_child_logger(__name__)
 
@@ -32,7 +32,8 @@ class BertForUtteranceEncoding(BertPreTrainedModel):
                  mask_self=None,
                  graph_add_layers=None,
                  graph_no_dropout=False,
-                 graph_no_layer_norm=False):
+                 graph_no_layer_norm=False,
+                 pos_emb_per_layer=False):
         super(BertForUtteranceEncoding, self).__init__(config)
 
         config.cls_n_head = cls_n_head
@@ -45,8 +46,14 @@ class BertForUtteranceEncoding(BertPreTrainedModel):
         self.bert = BertModel(config)
 
         if graph_add_layers is not None:
-            for x in graph_add_layers:
-                self.bert.encoder.layer[x].attention.self = BiGraphSelfAttention(config)
+            for layer_idx, x in enumerate(graph_add_layers):
+                if not pos_emb_per_layer:
+                    if layer_idx == 0:
+                        self.bert.encoder.layer[x].attention.self = FixBiGraphSelfAttention(config, add_pos_emb=True)
+                    else:
+                        self.bert.encoder.layer[x].attention.self = FixBiGraphSelfAttention(config, add_pos_emb=False)
+                else:
+                    self.bert.encoder.layer[x].attention.self = FixBiGraphSelfAttention(config, add_pos_emb=True)
 
     def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
                 inputs_embeds=None, **kwargs):
@@ -87,7 +94,8 @@ class BeliefTracker(nn.Module):
                                                                           mask_self=args.mask_self,
                                                                           graph_add_layers=self.graph_add_layers,
                                                                           graph_no_dropout=args.graph_no_dropout,
-                                                                          graph_no_layer_norm=args.graph_no_layer_norm)
+                                                                          graph_no_layer_norm=args.graph_no_layer_norm,
+                                                                          pos_emb_per_layer=args.pos_emb_per_layer)
 
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob if args.dropout is None else args.dropout
