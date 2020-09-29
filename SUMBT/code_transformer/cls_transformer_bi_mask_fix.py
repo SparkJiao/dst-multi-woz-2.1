@@ -12,12 +12,12 @@ try:
     from . import layers
     from .metric import Average
     from .global_logger import get_child_logger
-    from .modeling_bi_graph import FixBiGraphSelfAttention
+    from .modeling_bi_graph import FixBiGraphSelfAttention, BertPredictionHeadTransform
 except ImportError:
     import layers
     from metric import Average
     from global_logger import get_child_logger
-    from modeling_bi_graph import FixBiGraphSelfAttention
+    from modeling_bi_graph import FixBiGraphSelfAttention, BertPredictionHeadTransform
 
 logger: Logger = get_child_logger(__name__)
 
@@ -126,6 +126,12 @@ class BeliefTracker(nn.Module):
             self.classifier = nn.Sequential(nn.Linear(self.bert_output_dim, self.bert_output_dim),
                                             nn.Tanh(),
                                             nn.Linear(self.bert_output_dim, 3))
+
+        logger.info(f'Add prediction head: {args.add_prediction_head}')
+        self.add_prediction_head = args.add_prediction_head
+        if args.add_prediction_head:
+            self.prediction_head = BertPredictionHeadTransform(self.utterance_encoder.config)
+
         if args.distance_metric == 'product':
             self.hidden_output = nn.Linear(self.bert_output_dim, self.bert_output_dim, bias=False)
         else:
@@ -297,6 +303,9 @@ class BeliefTracker(nn.Module):
 
         answer_type_logits = self.classifier(hidden)
         _, answer_type_pred = answer_type_logits.max(dim=-1)
+
+        if self.add_prediction_head:
+            hidden = self.prediction_head(hidden)
 
         hidden = self.hidden_output(hidden)
 

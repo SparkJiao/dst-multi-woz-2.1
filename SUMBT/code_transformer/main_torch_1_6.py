@@ -712,6 +712,7 @@ def main():
     parser.add_argument('--graph_no_dropout', default=False, action='store_true')
     parser.add_argument('--graph_no_layer_norm', default=False, action='store_true')
     parser.add_argument('--pos_emb_per_layer', default=False, action='store_true')
+    parser.add_argument('--add_prediction_head', default=False, action='store_true')
 
     args = parser.parse_args()
 
