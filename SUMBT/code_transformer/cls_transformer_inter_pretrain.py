@@ -265,6 +265,17 @@ class BeliefTracker(nn.Module):
             if self.add_query_attn:
                 queried_seq_h = self.query_attn(slot_hidden, seq_hidden, seq_hidden,
                                                 attention_mask=extended_mask)[0]
+                # if self.efficient:
+                #     def create_custom_forward(module):
+                #         def custom_forward(*inputs):
+                #             return module(*inputs, slot_dim=slot_dim)
+                #
+                #         return custom_forward
+                #     hidden = torch.utils.checkpoint.checkpoint(
+                #         create_custom_forward(self.transformer),
+                #         slot_h, casual_mask, full_mask, queried_seq_h
+                #     )[0]
+                # else:
                 hidden = self.transformer(slot_h, casual_mask, full_mask, queried_seq_h, slot_dim=slot_dim)[0]
             else:
                 hidden = self.transformer(slot_h, casual_mask, full_mask, slot_dim=slot_dim)[0]

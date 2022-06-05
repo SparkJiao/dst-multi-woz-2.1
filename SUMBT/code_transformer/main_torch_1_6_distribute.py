@@ -703,6 +703,11 @@ def main():
     parser.add_argument('--add_interaction', default=False, action='store_true')
     parser.add_argument('--sinusoidal_embeddings', default=False, action='store_true')
 
+    parser.add_argument('--cls_n_head', default=6, type=int)
+    parser.add_argument('--cls_d_head', default=128, type=int)
+    parser.add_argument('--graph_residual', default=True, action='store_true')
+    parser.add_argument('--graph_add_layers', default='9,10,11', type=str)
+
     args = parser.parse_args()
 
     # CUDA setup
@@ -733,7 +738,8 @@ def main():
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     # Tensorboard logging
-    tb_file_name = '/'.join(args.output_dir.split('/')[1:])
+    # tb_file_name = '/'.join(args.output_dir.split('/')[1:])
+    tb_file_name = '/'.join(args.output_dir.split('/')[2:])
     if args.local_rank in [-1, 0]:
         if not args.do_not_use_tensorboard:
             summary_writer = SummaryWriter("./%s/%s" % (args.tf_dir, tb_file_name))
@@ -819,7 +825,7 @@ def main():
             train_sampler = DistributedSampler(train_data)
 
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size,
-                                      pin_memory=True, num_workers=4)
+                                      pin_memory=True)
 
         ## Dev utterances
         all_input_ids_dev, all_input_len_dev, all_answer_type_ids_dev, all_label_ids_dev = convert_examples_to_features(
@@ -857,6 +863,8 @@ def main():
         from cls_query_transformer import BeliefTracker
     elif args.nbt == 'copy':
         from cls_transformer_flat_copy import BeliefTracker
+    elif args.nbt == 'bi_graph':
+        from cls_transformer_bi_mask import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -867,6 +875,7 @@ def main():
         pre_train = torch.load(args.pretrain)
         pre_train_state_dict = get_pretrain(model, pre_train)
         model.load_state_dict(pre_train_state_dict)
+        del pre_train
 
     # if args.fp16:
     #     model.half()
@@ -886,8 +895,6 @@ def main():
 
     ## Initialize slot and value embeddings
     model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
-    # model.to(torch.device('cpu'))
-    # model.to(device)
 
     # Prepare optimizer
     if args.do_train:
@@ -993,11 +1000,6 @@ def main():
                         summary_writer.add_scalar("Train/JointAcc", acc, global_step)
                         summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
                         if n_gpu == 1:
-                            # for i, slot in enumerate(processor.target_slot):
-                            #     summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
-                            #                               global_step)
-                            #     summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
-                            #                               global_step)
                             if hasattr(model, "get_metric"):
                                 metric = model.get_metric(reset=False)
                                 for k, v in metric.items():
@@ -1278,7 +1280,7 @@ def main():
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 
         eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation,
-                                                    test_file=args.dev_file)
+                                                    test_file=args.test_file)
         all_input_ids, all_input_len, all_answer_type_ids, all_label_ids = convert_examples_to_features(
             eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
         all_token_type_ids, all_input_mask = make_aux_tensors(all_input_ids, all_input_len)

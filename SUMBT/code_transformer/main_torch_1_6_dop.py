@@ -465,12 +465,7 @@ def make_aux_tensors(ids, len):
 
 def main():
     """
-    This script fix the undefined values in ontology. Please search "FIX_UNDEFINED" to find the difference with `main-multislot.py`
-
-    For undefined values, we address `undefined` as the last possible value for each slot and remove its embedding.
-    Therefore we can mask their label ids as the ignore_index while computing loss,
-    so the undefined value will not have an influence on gradient and while computing
-    accuracy, they will be computed as wrong for the model never 'seen' undefined value.
+    Double optimizer with different learning rate
     """
     parser = argparse.ArgumentParser()
 
@@ -705,14 +700,8 @@ def main():
     parser.add_argument('--add_interaction', default=False, action='store_true')
     parser.add_argument('--sinusoidal_embeddings', default=False, action='store_true')
 
-    parser.add_argument('--cls_n_head', default=6, type=int)
-    parser.add_argument('--cls_d_head', default=128, type=int)
-    parser.add_argument('--graph_residual', default=True, action='store_true')
-    parser.add_argument('--graph_add_layers', default='9,10,11', type=str)
-    parser.add_argument('--graph_no_dropout', default=False, action='store_true')
-    parser.add_argument('--graph_no_layer_norm', default=False, action='store_true')
-    parser.add_argument('--pos_emb_per_layer', default=False, action='store_true')
-    parser.add_argument('--add_prediction_head', default=False, action='store_true')
+    # Double optimizer learning rate
+    parser.add_argument('--op2_lr', default=1e-3, type=float)
 
     args = parser.parse_args()
 
@@ -726,7 +715,7 @@ def main():
 
     # Tensorboard logging
     if not args.do_not_use_tensorboard:
-        tb_file_name = '/'.join(args.output_dir.split('/')[2:])
+        tb_file_name = '/'.join(args.output_dir.split('/')[1:])
         summary_writer = SummaryWriter("./%s/%s" % (args.tf_dir, tb_file_name))
     else:
         summary_writer = None
@@ -822,7 +811,7 @@ def main():
             train_sampler = DistributedSampler(train_data)
 
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size,
-                                      pin_memory=True)
+                                      pin_memory=True, num_workers=4)
 
         ## Dev utterances
         all_input_ids_dev, all_input_len_dev, all_answer_type_ids_dev, all_label_ids_dev = convert_examples_to_features(
@@ -860,10 +849,6 @@ def main():
         from cls_query_transformer import BeliefTracker
     elif args.nbt == 'copy':
         from cls_transformer_flat_copy import BeliefTracker
-    elif args.nbt == 'bi_graph':
-        from cls_transformer_bi_mask import BeliefTracker
-    elif args.nbt == 'bi_graph_fix':
-        from cls_transformer_bi_mask_fix import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -893,19 +878,39 @@ def main():
 
     ## Initialize slot and value embeddings
     model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
+    # model.to(torch.device('cpu'))
+    # model.to(device)
 
     # Prepare optimizer
     if args.do_train:
         def get_optimizer_grouped_parameters(model):
-            param_optimizer = [(n, p) for n, p in model.named_parameters() if p.requires_grad and 'pooler' not in n]
-            no_decay = ['bias', 'LayerNorm.weight']
-            optimizer_grouped_parameters = [
-                {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-                {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
-            ]
-            return optimizer_grouped_parameters
+            param1 = [(n, p) for n, p in model.utterance_encoder.named_parameters()
+                      if p.requires_grad and 'pooler' not in n]
+            param2 = [(n, p) for n, p in model.named_parameters()
+                      if p.requires_grad and 'pooler' not in n and 'utterance_encoder' not in n]
+            print('utterance encoder parameters:', len(param1))
+            print('upper module parameters:', len(param2))
 
-        optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
+            # param_optimizer = [(n, p) for n, p in model.named_parameters() if p.requires_grad and 'pooler' not in n]
+            no_decay = ['bias', 'LayerNorm.weight']
+            # optimizer_grouped_parameters = [
+            #     {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+            #     {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
+            # ]
+
+            grouped_param1 = [
+                {'params': [p for n, p in param1 if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+                {'params': [p for n, p in param1 if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
+            ]
+
+            grouped_param2 = [
+                {'params': [p for n, p in param2 if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+                {'params': [p for n, p in param2 if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
+            ]
+
+            return grouped_param1, grouped_param2
+
+        optimizer_grouped_parameters1, optimizer_grouped_parameters2 = get_optimizer_grouped_parameters(model)
 
         t_total = num_train_steps
 
@@ -913,23 +918,27 @@ def main():
             t_total = t_total // torch.distributed.get_world_size()
 
         # no bias correct_bias for BERT
-        optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon, correct_bias=False)
-        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(t_total * args.warmup_proportion),
-                                                    num_training_steps=t_total)
+        # optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon, correct_bias=False)
+        optimizer1 = AdamW(optimizer_grouped_parameters1,
+                           lr=args.learning_rate, eps=args.adam_epsilon, correct_bias=False)
+        scheduler1 = get_linear_schedule_with_warmup(optimizer1, num_warmup_steps=int(t_total * args.warmup_proportion),
+                                                     num_training_steps=t_total)
+
+        optimizer2 = AdamW(optimizer_grouped_parameters2,
+                           lr=args.op2_lr, eps=args.adam_epsilon, correct_bias=False)
+        scheduler2 = get_linear_schedule_with_warmup(optimizer2, num_warmup_steps=int(t_total * args.warmup_proportion),
+                                                     num_training_steps=t_total)
 
         scaler = torch.cuda.amp.GradScaler()
 
-        logger.info(optimizer)
+        logger.info(optimizer1)
+        logger.info(optimizer2)
 
         # Data parallelize when use multi-gpus
         if args.local_rank != -1:
-            try:
-                from apex.parallel import DistributedDataParallel as DDP
-            except ImportError:
-                raise ImportError(
-                    "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-
-            model = DDP(model)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
+                                                              output_device=args.local_rank,
+                                                              find_unused_parameters=True)
         elif n_gpu > 1:
             model = torch.nn.DataParallel(model)
 
@@ -984,23 +993,33 @@ def main():
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    scaler.unscale_(optimizer)
+                    scaler.unscale_(optimizer1)
+                    scaler.unscale_(optimizer2)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                    scaler.step(optimizer)
+
+                    scaler.step(optimizer1)
+                    scaler.step(optimizer2)
                     scaler.update()
 
-                    scheduler.step()
+                    scheduler1.step()
+                    scheduler2.step()
                     # model.zero_grad()
-                    optimizer.zero_grad()
+                    optimizer1.zero_grad()
+                    optimizer2.zero_grad()
                     global_step += 1
 
-                    lr_this_step = scheduler.get_lr()[0]
-                    if summary_writer is not None:
+                    lr_this_step = scheduler1.get_lr()[0]
+                    if args.local_rank in [-1, 0] and summary_writer is not None:
                         summary_writer.add_scalar("Epoch", epoch, global_step)
                         summary_writer.add_scalar("Train/Loss", loss, global_step)
                         summary_writer.add_scalar("Train/JointAcc", acc, global_step)
                         summary_writer.add_scalar("Train/LearningRate", lr_this_step, global_step)
                         if n_gpu == 1:
+                            # for i, slot in enumerate(processor.target_slot):
+                            #     summary_writer.add_scalar("Train/Loss_%s" % slot.replace(' ', '_'), loss_slot[i],
+                            #                               global_step)
+                            #     summary_writer.add_scalar("Train/Acc_%s" % slot.replace(' ', '_'), acc_slot[i],
+                            #                               global_step)
                             if hasattr(model, "get_metric"):
                                 metric = model.get_metric(reset=False)
                                 for k, v in metric.items():
@@ -1081,6 +1100,13 @@ def main():
                             summary_writer.add_scalar("Validate/Acc", dev_acc, global_step)
                             summary_writer.add_scalar("Validate/Cls_Acc", dev_type_acc, global_step)
                             if n_gpu == 1:
+                                # for i, slot in enumerate(processor.target_slot):
+                                #     summary_writer.add_scalar("Validate/Loss_%s" % slot.replace(' ', '_'),
+                                #                               dev_loss_slot[i] / all_input_ids_dev.size(0), global_step)
+                                #     summary_writer.add_scalar("Validate/Acc_%s" % slot.replace(' ', '_'), dev_acc_slot[i],
+                                #                               global_step)
+                                #     summary_writer.add_scalar("Validate/Cls_Acc_%s" % slot.replace(' ', '_'), dev_acc_slot_type[i],
+                                #                               global_step)
                                 if hasattr(model, "get_metric"):
                                     metric = model.get_metric(reset=True)
                                     for k, v in metric.items():
@@ -1233,16 +1259,15 @@ def main():
                     label_ids = label_ids.unsuqeeze(0)
 
                 with torch.no_grad():
-                    with torch.cuda.amp.autocast():
-                        if n_gpu == 1:
-                            loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                                = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
-                        else:
-                            loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
-                                = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
-                            nbatch = label_ids.size(0)
-                            nslot = pred_slot.size(3)
-                            pred_slot = pred_slot.view(nbatch, -1, nslot)
+                    if n_gpu == 1:
+                        loss, loss_slot, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
+                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                    else:
+                        loss, _, acc, type_acc, acc_slot, type_acc_slot, pred_slot \
+                            = model(input_ids, token_type_ids, input_mask, answer_type_ids, label_ids, n_gpu)
+                        nbatch = label_ids.size(0)
+                        nslot = pred_slot.size(3)
+                        pred_slot = pred_slot.view(nbatch, -1, nslot)
 
                 accuracies = eval_all_accs(pred_slot, answer_type_ids, label_ids, accuracies)
                 predictions.extend(get_predictions(pred_slot, answer_type_ids, label_ids, processor,
