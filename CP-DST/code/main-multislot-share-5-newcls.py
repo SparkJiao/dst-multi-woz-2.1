@@ -886,6 +886,12 @@ def main():
         from BeliefTrackerShareSA_cls_graph2_plus import BeliefTracker
     elif args.nbt == 'graph2_p_emb_baseline':
         from BeliefTrackerShareSA_cls_graph2_plus_emb_baseline import BeliefTracker
+    elif args.nbt == 'graph2p_tf':
+        from BeliefTrackerShareSA_cls_graph2_tf import BeliefTracker
+    elif args.nbt == 'graph2p_tf_pos':
+        from BeliefTrackerShareSA_cls_graph2_tf_pos import BeliefTracker
+    elif args.nbt == 'graph2p_fuse_baseline':
+        from BeliefTrackerShareSA_cls_graph2_fuse_baseline import BeliefTracker
     else:
         raise ValueError('nbt type should be either rnn or transformer')
 
@@ -1239,12 +1245,12 @@ def main():
         model.to(device)
         model.initialize_slot_value_lookup(label_token_ids, slot_token_ids)
 
-        if args.fp16:
-            try:
-                from apex import amp
-            except ImportError:
-                raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-            model = amp.initialize(model, opt_level=args.fp16_opt_level)
+        # if args.fp16:
+        #     try:
+        #         from apex import amp
+        #     except ImportError:
+        #         raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+        #     model = amp.initialize(model, opt_level=args.fp16_opt_level)
 
         # Evaluation
         if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
